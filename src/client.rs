@@ -4,10 +4,11 @@
 use std::net::{TcpStream, ToSocketAddrs};
 use std::net::Shutdown;
 use std::time::Duration;
-use std::fmt;
 use std::io;
 use std::io::{Read, Write};
 use std::time::Instant;
+
+use thiserror::Error;
 
 
 // Connection types
@@ -77,50 +78,38 @@ macro_rules! make_u16 {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum S7Error {
-    Io(io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Not connected")]
     NotConnected,
+    #[error("TCP connection failed")]
     TcpConnectionFailed,
+    #[error("TCP connection closed by the peer")]
     ConnectionClosed,
+    #[error("ISO-on-TCP connection failed")]
     IsoConnectionFailed,
+    #[error("Fragmented ISO Packet")]
     IsoFragmentedPacket,
+    #[error("Invalid ISO Header")]
     IsoInvalidHeader,
+    #[error("Invalid ISO Telegram")]
     IsoInvalidTelegram,
+    #[error("S7 PDU negotiation failed")]
     PduNegotiationFailed,
+    #[error("Invalid parameter supplied to the function")]
     InvalidFunParameter,
+    #[error("S7 Resource not found in the CPU")]
     S7NotFound,
+    #[error("S7 Invalid address")]
     S7InvalidAddress,
+    #[error("S7 unspecified error")]
     S7Unspecified,
+    #[error("{0}")]
     Other(String),
 }
 
-impl fmt::Display for S7Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            S7Error::Io(e) => write!(f, "IO error: {}", e),
-            S7Error::NotConnected => write!(f, "Not connected"),
-            S7Error::TcpConnectionFailed => write!(f, "TCP connection failed"),
-            S7Error::ConnectionClosed => write!(f, "TCP connection closed by the peer"),
-            S7Error::IsoConnectionFailed => write!(f, "ISO-on-TCP connection failed"),
-            S7Error::IsoFragmentedPacket => write!(f, "Fragmented ISO Packet"),
-            S7Error::IsoInvalidHeader => write!(f, "Invalid ISO Header"),
-            S7Error::IsoInvalidTelegram => write!(f, "Invalid ISO Telegram"),
-            S7Error::PduNegotiationFailed => write!(f, "S7 PDU negotiation failed"),
-            S7Error::InvalidFunParameter => write!(f, "Invalid parameter supplied to the function"),
-            S7Error::S7NotFound => write!(f, "S7 Resource not found in the CPU"),
-            S7Error::S7InvalidAddress => write!(f, "S7 Invalid address"),
-            S7Error::S7Unspecified => write!(f, "S7 unspecified error"),
-            S7Error::Other(msg) => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl From<io::Error> for S7Error {
-    fn from(err: io::Error) -> S7Error {
-        S7Error::Io(err)
-    }
-}
 pub struct S7Client {
     stream: Option<TcpStream>,
     port: u16,

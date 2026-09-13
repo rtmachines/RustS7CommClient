@@ -15,3 +15,6 @@ categories = ["network-programming","api-bindings"]
 [lib]
 name = "rust7"
 path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2"
