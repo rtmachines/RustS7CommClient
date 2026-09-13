@@ -9,8 +9,8 @@ fn main() {
     match client.connect_s71200_1500("192.168.0.100") {
         Ok(_) => {
             println!("Connected to PLC");
-            println!("PDU negotiated: {} byte", client.pdu_length);
-            println!("Job time (ms) : {:.3}", client.last_time);
+            println!("PDU negotiated: {} byte", client.pdu_length());
+            println!("Job time (ms) : {:.3}", client.last_time());
         },
         Err(e) => {
             eprintln!("Connection failed: {}", e);
@@ -24,8 +24,8 @@ fn main() {
     match client.read_db(db_number, 0, &mut read_buffer) {
         Ok(_) => {          
             println!("Success!");
-            println!("Job time (ms) : {:.3}", client.last_time);
-            println!("Chunks        : {}", client.chunks);           
+            println!("Job time (ms) : {:.3}", client.last_time());
+            println!("Chunks        : {}", client.chunks());           
             println!("Data read:");
             for (i, chunk) in read_buffer.chunks(32).enumerate() {
                 print!("{:04X}: ", i * 32); // Hexc Offset
@@ -50,8 +50,8 @@ fn main() {
     match client.write_db(db_number, 0, &write_data) {
         Ok(_) => { 
             println!("Success!");
-            println!("Job time (ms) : {:.3}", client.last_time);
-            println!("Chunks        : {}", client.chunks);           
+            println!("Job time (ms) : {:.3}", client.last_time());
+            println!("Chunks        : {}", client.chunks());           
         },
         Err(e) => eprintln!("Write failed: {}", e),
     }
@@ -62,8 +62,8 @@ fn main() {
     match client.read_bit(client::S7_AREA_DB,  db_number, 47, 5) {
         Ok(value) => {
             println!("Success!");
-            println!("Job time (ms) : {:.3}", client.last_time);
-            println!("Chunks        : {}", client.chunks);           
+            println!("Job time (ms) : {:.3}", client.last_time());
+            println!("Chunks        : {}", client.chunks());           
             println!("Value read    : {}", value)
         },
         Err(e) => eprintln!("Read failed: {}", e),
@@ -75,8 +75,8 @@ fn main() {
     match client.write_bit(client::S7_AREA_DB, db_number, 16, 0, false) {
         Ok(_) => {
             println!("Success!");
-            println!("Job time (ms) : {:.3}", client.last_time);
-            println!("Chunks        : {}", client.chunks);           
+            println!("Job time (ms) : {:.3}", client.last_time());
+            println!("Chunks        : {}", client.chunks());           
         },
         Err(e) => eprintln!("Write failed: {}", e),
     }

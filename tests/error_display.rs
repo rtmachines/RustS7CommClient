@@ -25,7 +25,12 @@ fn display_text_is_unchanged() {
         (S7Error::S7NotFound, "S7 Resource not found in the CPU"),
         (S7Error::S7InvalidAddress, "S7 Invalid address"),
         (S7Error::S7Unspecified, "S7 unspecified error"),
-        (S7Error::Other("custom".to_string()), "custom"),
+        (S7Error::Timeout, "Operation timed out"),
+        (S7Error::S7InvalidResponse, "Invalid S7 response"),
+        (
+            S7Error::WriteIncomplete { acknowledged: 212, requested: 300, source: Box::new(S7Error::Timeout) },
+            "Write incomplete: 212 of 300 bytes acknowledged: Operation timed out",
+        ),
     ];
 
     for (err, expected) in cases {
@@ -43,6 +48,22 @@ fn io_variant_display_is_unchanged() {
 fn from_io_error_still_converts() {
     let err: S7Error = io::Error::new(io::ErrorKind::ConnectionRefused, "refused").into();
     assert!(matches!(err, S7Error::Io(_)));
+}
+
+#[test]
+fn from_io_error_normalises_timeouts_and_disconnects() {
+    let timeout: S7Error = io::Error::from(io::ErrorKind::WouldBlock).into();
+    assert!(matches!(timeout, S7Error::Timeout));
+    let eof: S7Error = io::Error::from(io::ErrorKind::UnexpectedEof).into();
+    assert!(matches!(eof, S7Error::ConnectionClosed));
+}
+
+#[test]
+fn write_incomplete_exposes_its_source() {
+    let err = S7Error::WriteIncomplete { acknowledged: 0, requested: 1, source: Box::new(S7Error::S7NotFound) };
+    assert_eq!(err.source().unwrap().to_string(), "S7 Resource not found in the CPU");
+    assert!(err.is_plc_error());
+    assert!(!err.requires_reconnect());
 }
 
 #[test]

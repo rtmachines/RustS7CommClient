@@ -39,8 +39,10 @@ The connection process is quite complex, and the PLC is not a web server, so the
 
 **Second consideration:**
 
-There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
-In the first case, it is **strongly recommended** to disconnect from the PLC and reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
+There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP failures, timeouts, corrupt headers due to fragmented packets, replies that do not match the request, etc., and high-level errors, such as a read request from a non-existent database.
+In the first case the client **disconnects by itself**: after such an error the byte stream may be out of sync with the CPU (for example a late reply to a timed-out request could otherwise be taken as the answer to the next one), so the socket is closed and every further operation returns `S7Error::NotConnected` until you reconnect. Use `S7Error::requires_reconnect()` to tell the two categories apart; this is the same behavior adopted by WinCC and all other SCADA programs.
+
+For writes, a failure in the middle of a large (multi-telegram) transfer is reported as `S7Error::WriteIncomplete { acknowledged, requested, source }`: `acknowledged` leading bytes were confirmed by the CPU; whether the telegram in flight was applied is unknown when `source` is a low-level error, and it was not applied when `source` is a high-level error (`S7Error::is_plc_error()`).
 
 **Third consideration:**
 
@@ -62,11 +64,11 @@ A very simplistic pseudo-code would be this:
 ```rust
 while !exit_request{
     
-    if !Client.connected {
+    if !Client.is_connected() {
         let _ = client.connect_s71200_1500(ip_address);
     }
     
-    if Client.connected {
+    if Client.is_connected() {
         if !do_read_and_write() { // <-- returns false when severe error occurs
             Client.disconnect();
         }
@@ -140,7 +142,7 @@ In this case, use `CT_OP` or `CT_S7`.
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. The client must not be connected (that is, call this method before connecting).
@@ -162,7 +164,7 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. Values must be > 0, otherwise they are ignored
@@ -182,7 +184,7 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 ### Notes
 1. Value must be > 0, otherwise it is ignored
@@ -255,10 +257,14 @@ changed it via `set_connection_port()`
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::TcpConnectionFailed`: TCP connection could not be established.
-- `S7Error::IsoConnectionFailed`: ISO connection failed
-- `S7Error::PduNegotiationFailed`: PDU negotiation failed.
-- `S7Error::Io`: network I/O error.
+- `S7Error::TcpConnectionFailed`: the address did not resolve.
+- `S7Error::IsoConnectionFailed`: ISO connection refused by the peer.
+- `S7Error::PduNegotiationFailed`: PDU negotiation refused, or the CPU proposed a PDU length outside `29..=480`.
+- `S7Error::Io`, `S7Error::Timeout`, `S7Error::ConnectionClosed`: network failure.
+
+#### Notes
+- If the client is already connected, the old connection is closed first.
+- `connect_rack_slot()` rejects `rack > 7` or `slot > 31` with `S7Error::InvalidFunParameter`.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -297,22 +303,19 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 `Ok(())` Operation succeeded.
 
 #### Errors
-##### Low level
-- `S7Error::NotConnected`: An attempt was made to read while the client was not connected.
-- `S7Error::IsoInvalidHeader`: Invalid ISO Header
-- `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
-- `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+##### Low level (the client disconnects, see `S7Error::requires_reconnect()`)
+- `S7Error::Io`, `S7Error::Timeout`, `S7Error::ConnectionClosed`: network failure.
+- `S7Error::IsoInvalidHeader`, `S7Error::IsoInvalidTelegram`, `S7Error::IsoFragmentedPacket`: bad framing.
+- `S7Error::S7InvalidResponse`: the reply does not match the request (reference, function, item size).
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
-  
-##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+##### High level (still connected)
+- `S7Error::NotConnected`: An attempt was made to read while the client was not connected.
+- `S7Error::InvalidFunParameter`: invalid area or wordlen, empty buffer with `S7_WL_BIT`, or a buffer longer than 65535 bytes.
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
+- `S7Error::S7Unspecified`: the CPU rejected the job with another code.
 
 #### Notes
 - The number of bytes to read will be equal to the size of the buffer passed.
@@ -352,22 +355,22 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 `Ok(())` Operation succeeded.
 
 #### Errors
-##### Low level
+##### Before anything is sent (still connected)
 - `S7Error::NotConnected`: An attempt was made to write while the client was not connected.
-- `S7Error::IsoInvalidHeader`: Invalid ISO Header
-- `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
-- `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+- `S7Error::InvalidFunParameter`: invalid area or wordlen, empty buffer with `S7_WL_BIT`, or a buffer longer than 65535 bytes.
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
-
-##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+##### CPU rejected the first telegram (nothing applied, still connected)
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
+- `S7Error::S7Unspecified`: the CPU rejected the job with another code.
+
+##### Anything else after data hit the wire
+- `S7Error::WriteIncomplete { acknowledged, requested, source }`: `acknowledged` leading bytes were confirmed by the CPU.
+  When `source` is a low-level error (`Io`, `Timeout`, `ConnectionClosed`, `Iso*`, `S7InvalidResponse`) the telegram in flight
+  **may or may not** have been applied and the client has disconnected; when `source` is a high-level error it was not applied
+  and the client stays connected.
 
 #### Notes
 - The number of bytes to write will be equal to the size of the buffer passed.
@@ -442,7 +445,7 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
  `Ok(<bool>)` or `Err(<S7Error>)`
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by read_area()
 
  #### Suggestion
@@ -479,7 +482,7 @@ To write **1** into DB10.DBX71.4 use:
 `Ok(())` Operation succeeded.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by write_area()
 
 #### Notes

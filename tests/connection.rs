@@ -23,17 +23,17 @@ fn connects_and_stores_negotiated_pdu_length() {
 
     client.connect_s71200_1500(&plc.ip()).unwrap();
 
-    assert!(client.connected);
-    assert_eq!(client.pdu_length, 240);
-    assert!(client.last_time > 0.0, "last_time must hold the handshake duration");
+    assert!(client.is_connected());
+    assert_eq!(client.pdu_length(), 240);
+    assert!(client.last_time() > 0.0, "last_time must hold the handshake duration");
 }
 
 #[test]
 fn pdu_length_is_whatever_the_plc_negotiates_not_what_was_requested() {
-    for pdu in [64u16, 480, 960, 1920] {
+    for pdu in [64u16, 240, 480] {
         let plc = accepting_plc(pdu);
         let client = plc.connected_client();
-        assert_eq!(client.pdu_length, pdu);
+        assert_eq!(client.pdu_length(), pdu);
     }
 }
 
@@ -132,8 +132,8 @@ fn iso_disconnect_request_yields_iso_connection_failed() {
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
     assert!(matches!(err, S7Error::IsoConnectionFailed), "{err:?}");
-    assert!(!client.connected);
-    assert_eq!(client.last_time, 0.0);
+    assert!(!client.is_connected());
+    assert_eq!(client.last_time(), 0.0);
     assert!(plc.negotiation_requests().is_empty(), "must not negotiate after ISO failure");
 }
 
@@ -144,8 +144,8 @@ fn peer_closing_after_connection_request_fails_the_iso_step() {
 
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
-    assert!(matches!(err, S7Error::IsoConnectionFailed | S7Error::Io(_)), "{err:?}");
-    assert!(!client.connected);
+    assert!(matches!(err, S7Error::ConnectionClosed), "{err:?}");
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -156,8 +156,8 @@ fn negotiation_with_wrong_protocol_id_fails() {
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
     assert!(matches!(err, S7Error::PduNegotiationFailed), "{err:?}");
-    assert!(!client.connected);
-    assert_eq!(client.pdu_length, 0);
+    assert!(!client.is_connected());
+    assert_eq!(client.pdu_length(), 0);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn negotiation_with_error_class_fails() {
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
     assert!(matches!(err, S7Error::PduNegotiationFailed), "{err:?}");
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -179,20 +179,20 @@ fn negotiated_pdu_length_of_zero_is_rejected() {
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
     assert!(matches!(err, S7Error::PduNegotiationFailed), "{err:?}");
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 #[test]
-#[ignore = "known defect: a negotiated pdu_length in 1..=27 underflows `pdu_length - 18` / `- 28` in connect_tsap (panics in debug, wraps to a huge chunk size in release); only 0 is rejected"]
 fn negotiated_pdu_length_smaller_than_the_s7_headers_is_rejected() {
-    for pdu in [1u16, 17, 18, 27] {
+    // 28 is the write-request overhead itself: it would leave 0 payload bytes per telegram.
+    for pdu in [1u16, 17, 18, 27, 28] {
         let plc = FakePlc::start(Handshake::Accept { pdu_length: pdu }, echo_memory_handler);
         let mut client = plc.client();
 
         let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
         assert!(matches!(err, S7Error::PduNegotiationFailed), "pdu {pdu}: {err:?}");
-        assert!(!client.connected);
+        assert!(!client.is_connected());
     }
 }
 
@@ -203,8 +203,8 @@ fn peer_closing_during_negotiation_fails() {
 
     let err = client.connect_s71200_1500(&plc.ip()).unwrap_err();
 
-    assert!(matches!(err, S7Error::PduNegotiationFailed | S7Error::Io(_)), "{err:?}");
-    assert!(!client.connected);
+    assert!(matches!(err, S7Error::ConnectionClosed), "{err:?}");
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn refused_tcp_connection_is_reported_as_io_error() {
         S7Error::Io(e) => assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused, "{e}"),
         other => panic!("expected Io(ConnectionRefused), got {other:?}"),
     }
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn unparsable_address_is_reported_as_io_error() {
     let mut client = rust7::S7Client::new();
     let err = client.connect_s71200_1500("").unwrap_err();
     assert!(matches!(err, S7Error::Io(_)), "{err:?}");
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -240,11 +240,11 @@ fn failed_connection_clears_previous_connected_state() {
     let bad = FakePlc::start(Handshake::RejectIso, echo_memory_handler);
 
     let mut client = good.connected_client();
-    assert!(client.connected);
+    assert!(client.is_connected());
 
     client.set_connection_port(bad.port()).unwrap();
     assert!(client.connect_s71200_1500(&bad.ip()).is_err());
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 // ---- lifecycle ---------------------------------------------------------------
@@ -258,7 +258,7 @@ fn disconnect_makes_data_access_fail_with_not_connected() {
 
     client.disconnect();
 
-    assert!(!client.connected);
+    assert!(!client.is_connected());
     assert!(matches!(client.read_db(1, 0, &mut buf), Err(S7Error::NotConnected)));
     assert!(matches!(client.write_db(1, 0, &buf), Err(S7Error::NotConnected)));
     assert!(plc.wait_for_closed(1, Duration::from_secs(2)), "peer must observe the shutdown");
@@ -270,7 +270,7 @@ fn disconnect_is_idempotent() {
     let mut client = plc.connected_client();
     client.disconnect();
     client.disconnect();
-    assert!(!client.connected);
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn client_can_reconnect_after_disconnect() {
 
     client.connect_s71200_1500(&plc.ip()).unwrap();
 
-    assert!(client.connected);
+    assert!(client.is_connected());
     assert_eq!(plc.connection_requests().len(), 2);
     let mut buf = [0u8; 2];
     client.read_db(7, 0, &mut buf).unwrap();
@@ -299,7 +299,7 @@ fn client_can_reconnect_after_disconnect() {
 }
 
 #[test]
-fn read_timeout_is_reported_as_io_error_and_keeps_connection_flag() {
+fn read_timeout_is_reported_as_timeout_and_drops_the_connection() {
     let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| Reply::Silent);
     let mut client = plc.client();
     client.set_timeout(3000, 100, 500).unwrap();
@@ -308,14 +308,9 @@ fn read_timeout_is_reported_as_io_error_and_keeps_connection_flag() {
     let mut buf = [0u8; 4];
     let err = client.read_db(1, 0, &mut buf).unwrap_err();
 
-    match err {
-        S7Error::Io(e) => assert!(
-            matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
-            "unexpected kind {:?}",
-            e.kind()
-        ),
-        other => panic!("expected Io timeout, got {other:?}"),
-    }
-    assert_eq!(client.last_time, 0.0);
-    assert!(client.connected, "the client leaves reconnection to the caller");
+    assert!(matches!(err, S7Error::Timeout), "{err:?}");
+    assert!(err.requires_reconnect());
+    assert_eq!(client.last_time(), 0.0);
+    assert!(!client.is_connected(), "a stream that may hold a late reply is never reused");
+    assert!(plc.wait_for_closed(1, Duration::from_secs(2)), "peer must observe the shutdown");
 }

@@ -39,10 +39,10 @@ fn read_returns_exact_plc_memory_for_any_db_start_and_length() {
 
             let expected: Vec<u8> = (0..len as u32).map(|i| memory_byte(db, start as u32 + i)).collect();
             prop_assert_eq!(&buf, &expected);
-            prop_assert_eq!(client.chunks, len.div_ceil(max_chunk));
+            prop_assert_eq!(client.chunks(), len.div_ceil(max_chunk));
 
             let reqs = plc.take_requests();
-            prop_assert_eq!(reqs.len(), client.chunks);
+            prop_assert_eq!(reqs.len(), client.chunks());
             let mut expected_addr = (start as u32) << 3;
             for frame in &reqs {
                 let req = parse_request(frame);
@@ -74,7 +74,7 @@ fn write_chunks_reassemble_to_the_original_buffer_with_contiguous_addresses() {
 
                 let reqs = plc.take_requests();
                 prop_assert_eq!(reqs.len(), data.len().div_ceil(max_chunk));
-                prop_assert_eq!(client.chunks, reqs.len());
+                prop_assert_eq!(client.chunks(), reqs.len());
 
                 let mut reassembled = Vec::with_capacity(data.len());
                 let mut expected_addr = (start as u32) << 3;
@@ -157,7 +157,7 @@ fn remote_tsap_encodes_connection_type_rack_and_slot() {
                 let cr = plc.take_connection_requests().pop().expect("connection request captured");
                 prop_assert_eq!(local_tsap(&cr), 0x0100);
                 prop_assert_eq!(remote_tsap(&cr), (ct << 8) + rack * 0x20 + slot);
-                prop_assert!(client.connected);
+                prop_assert!(client.is_connected());
                 Ok(())
             },
         )
@@ -172,17 +172,17 @@ fn chunk_count_follows_negotiated_pdu_for_reads_and_writes() {
         .run(&(64u16..=480, 0usize..=3000), |(pdu, len)| {
             let plc = FakePlc::start(Handshake::Accept { pdu_length: pdu }, echo_memory_handler);
             let mut client = plc.connected_client();
-            prop_assert_eq!(client.pdu_length, pdu);
+            prop_assert_eq!(client.pdu_length(), pdu);
 
             let mut buf = vec![0u8; len];
             ok(client.read_db(1, 0, &mut buf))?;
-            prop_assert_eq!(client.chunks, len.div_ceil(max_read_chunk(pdu)));
+            prop_assert_eq!(client.chunks(), len.div_ceil(max_read_chunk(pdu)));
             for frame in plc.take_requests() {
                 prop_assert!(parse_request(&frame).count as usize <= max_read_chunk(pdu));
             }
 
             ok(client.write_db(1, 0, &buf))?;
-            prop_assert_eq!(client.chunks, len.div_ceil(max_write_chunk(pdu)));
+            prop_assert_eq!(client.chunks(), len.div_ceil(max_write_chunk(pdu)));
             for frame in plc.take_requests() {
                 prop_assert!(parse_request(&frame).payload.len() <= max_write_chunk(pdu));
             }

@@ -76,9 +76,22 @@ pub enum Handshake {
 }
 
 /// What the fake PLC does with one S7 request received after the handshake.
+///
+/// Every `Send`-like reply that carries an S7 header gets the PDU reference
+/// of the request it answers copied into bytes `[11..13]` (a real CPU echoes
+/// it), so handlers can keep using the frame builders below without caring
+/// about references. Use [`Reply::SendRaw`] to send bytes untouched.
 pub enum Reply {
-    /// Write these bytes back verbatim.
+    /// Write these bytes back, correlated with the request.
     Send(Vec<u8>),
+    /// Write these bytes back verbatim, no reference correlation.
+    SendRaw(Vec<u8>),
+    /// Wait, then write these bytes back (drives client read timeouts and
+    /// late replies).
+    Delayed(Duration, Vec<u8>),
+    /// Write the first part, wait, write the rest (a reply split across two
+    /// TCP segments).
+    Split(Vec<u8>, Duration, Vec<u8>),
     /// Shut the connection down without answering.
     Close,
     /// Never answer, keep the connection open (drives client read timeouts).
@@ -113,7 +126,10 @@ impl Drop for FakePlc {
 impl FakePlc {
     /// Starts listening on an ephemeral loopback port. Every accepted
     /// connection is served on its own thread, so tests may reconnect freely.
-    pub fn start(handshake: Handshake, handler: impl Fn(&[u8]) -> Reply + Send + Sync + 'static) -> Self {
+    pub fn start(
+        handshake: Handshake,
+        handler: impl Fn(&[u8]) -> Reply + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
         let addr = listener.local_addr().expect("local addr");
         let captured = Arc::new(Mutex::new(Captured::default()));
@@ -140,7 +156,12 @@ impl FakePlc {
             }
         });
 
-        Self { addr, captured, closed_connections, stopping }
+        Self {
+            addr,
+            captured,
+            closed_connections,
+            stopping,
+        }
     }
 
     pub fn ip(&self) -> String {
@@ -154,14 +175,18 @@ impl FakePlc {
     /// A fresh client already pointed at this fake PLC (not connected yet).
     pub fn client(&self) -> S7Client {
         let mut client = S7Client::new();
-        client.set_connection_port(self.port()).expect("ephemeral port is never 0");
+        client
+            .set_connection_port(self.port())
+            .expect("ephemeral port is never 0");
         client
     }
 
     /// A client connected with `connect_s71200_1500`.
     pub fn connected_client(&self) -> S7Client {
         let mut client = self.client();
-        client.connect_s71200_1500(&self.ip()).expect("handshake with fake PLC");
+        client
+            .connect_s71200_1500(&self.ip())
+            .expect("handshake with fake PLC");
         client
     }
 
@@ -226,11 +251,18 @@ fn read_frame(stream: &mut TcpStream) -> Option<Vec<u8>> {
     Some(frame)
 }
 
-fn serve(mut stream: TcpStream, handshake: Handshake, handler: &Handler, captured: &Mutex<Captured>) {
+fn serve(
+    mut stream: TcpStream,
+    handshake: Handshake,
+    handler: &Handler,
+    captured: &Mutex<Captured>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_nodelay(true);
 
-    let Some(cr) = read_frame(&mut stream) else { return };
+    let Some(cr) = read_frame(&mut stream) else {
+        return;
+    };
     captured.lock().unwrap().connection_requests.push(cr);
 
     match handshake {
@@ -240,32 +272,70 @@ fn serve(mut stream: TcpStream, handshake: Handshake, handler: &Handler, capture
             return;
         }
         _ => {
-            if stream.write_all(&iso_connection_reply(COTP_CONNECT_CONFIRM)).is_err() {
+            if stream
+                .write_all(&iso_connection_reply(COTP_CONNECT_CONFIRM))
+                .is_err()
+            {
                 return;
             }
         }
     }
 
-    let Some(pn) = read_frame(&mut stream) else { return };
-    captured.lock().unwrap().negotiation_requests.push(pn);
+    let Some(pn) = read_frame(&mut stream) else {
+        return;
+    };
+    captured
+        .lock()
+        .unwrap()
+        .negotiation_requests
+        .push(pn.clone());
 
-    let reply = match handshake {
+    let mut reply = match handshake {
         Handshake::Accept { pdu_length } => negotiation_reply(S7_ID, 0x00, pdu_length),
         Handshake::BadNegotiationProtocolId => negotiation_reply(0x00, 0x00, DEFAULT_PDU),
         Handshake::NegotiationErrorClass => negotiation_reply(S7_ID, 0x81, DEFAULT_PDU),
         Handshake::CloseAfterNegotiationRequest => return,
         Handshake::RejectIso | Handshake::CloseAfterCr => unreachable!("handled above"),
     };
+    correlate(&mut reply, &pn);
     if stream.write_all(&reply).is_err() {
         return;
     }
 
     loop {
-        let Some(request) = read_frame(&mut stream) else { return };
+        let Some(request) = read_frame(&mut stream) else {
+            return;
+        };
         captured.lock().unwrap().requests.push(request.clone());
         match handler(&request) {
-            Reply::Send(bytes) => {
+            Reply::Send(mut bytes) => {
+                correlate(&mut bytes, &request);
                 if stream.write_all(&bytes).is_err() {
+                    return;
+                }
+            }
+            Reply::SendRaw(bytes) => {
+                if stream.write_all(&bytes).is_err() {
+                    return;
+                }
+            }
+            Reply::Delayed(delay, mut bytes) => {
+                correlate(&mut bytes, &request);
+                thread::sleep(delay);
+                if stream.write_all(&bytes).is_err() {
+                    return;
+                }
+            }
+            Reply::Split(head, gap, tail) => {
+                let cut = head.len();
+                let mut whole = head;
+                whole.extend_from_slice(&tail);
+                correlate(&mut whole, &request);
+                if stream.write_all(&whole[..cut]).is_err() || stream.flush().is_err() {
+                    return;
+                }
+                thread::sleep(gap);
+                if stream.write_all(&whole[cut..]).is_err() {
                     return;
                 }
             }
@@ -277,6 +347,23 @@ fn serve(mut stream: TcpStream, handshake: Handshake, handler: &Handler, capture
             Reply::Silent => {}
         }
     }
+}
+
+/// Copies the PDU reference of `request` into `reply`, if both carry an S7 header.
+fn correlate(reply: &mut [u8], request: &[u8]) {
+    const REF: std::ops::Range<usize> = 11..13;
+    if reply.len() >= REF.end
+        && request.len() >= REF.end
+        && reply[7] == S7_ID
+        && request[7] == S7_ID
+    {
+        reply[REF].copy_from_slice(&request[REF]);
+    }
+}
+
+/// PDU reference carried by an S7 frame (request or reply).
+pub fn pdu_ref(frame: &[u8]) -> u16 {
+    be16(frame, 11)
 }
 
 // ---- frame builders ----------------------------------------------------------
@@ -313,17 +400,33 @@ pub fn iso_connection_reply(pdu_type: u8) -> Vec<u8> {
 /// 27-byte S7 "Setup Communication" ack-data telegram.
 pub fn negotiation_reply(protocol_id: u8, error_class: u8, pdu_length: u16) -> Vec<u8> {
     vec![
-        ISO_ID, 0x00, 0x00, 0x1B, // TPKT, length 27
-        0x02, 0xF0, EOT, // COTP data
-        protocol_id, 0x03, 0x00, 0x00, // S7 header: id, ack-data, redundancy
-        0x05, 0x00, // pdu reference
-        0x00, 0x08, // parameter length
-        0x00, 0x00, // data length
-        error_class, 0x00, // error class / code
-        0xF0, 0x00, // function: setup communication, reserved
-        0x00, 0x01, // max AMQ calling
-        0x00, 0x01, // max AMQ called
-        hi(pdu_length as usize), lo(pdu_length as usize),
+        ISO_ID,
+        0x00,
+        0x00,
+        0x1B, // TPKT, length 27
+        0x02,
+        0xF0,
+        EOT, // COTP data
+        protocol_id,
+        0x03,
+        0x00,
+        0x00, // S7 header: id, ack-data, redundancy
+        0x05,
+        0x00, // pdu reference
+        0x00,
+        0x08, // parameter length
+        0x00,
+        0x00, // data length
+        error_class,
+        0x00, // error class / code
+        0xF0,
+        0x00, // function: setup communication, reserved
+        0x00,
+        0x01, // max AMQ calling
+        0x00,
+        0x01, // max AMQ called
+        hi(pdu_length as usize),
+        lo(pdu_length as usize),
     ]
 }
 
@@ -337,15 +440,31 @@ pub fn read_reply(return_code: u8, payload: &[u8]) -> Vec<u8> {
         (0x00, 0)
     };
     let mut frame = vec![
-        ISO_ID, 0x00, hi(total), lo(total),
-        0x02, 0xF0, EOT,
-        S7_ID, 0x03, 0x00, 0x00,
-        0x05, 0x00,
-        0x00, 0x02,
-        hi(data_len), lo(data_len),
-        0x00, 0x00,
-        FN_READ_VAR, 0x01,
-        return_code, transport, hi(bits), lo(bits),
+        ISO_ID,
+        0x00,
+        hi(total),
+        lo(total),
+        0x02,
+        0xF0,
+        EOT,
+        S7_ID,
+        0x03,
+        0x00,
+        0x00,
+        0x05,
+        0x00,
+        0x00,
+        0x02,
+        hi(data_len),
+        lo(data_len),
+        0x00,
+        0x00,
+        FN_READ_VAR,
+        0x01,
+        return_code,
+        transport,
+        hi(bits),
+        lo(bits),
     ];
     frame.extend_from_slice(payload);
     frame
@@ -354,14 +473,27 @@ pub fn read_reply(return_code: u8, payload: &[u8]) -> Vec<u8> {
 /// Write Var response: 7 (TPKT+COTP) + 15 (S7 header + item return code).
 pub fn write_reply(return_code: u8) -> Vec<u8> {
     vec![
-        ISO_ID, 0x00, 0x00, 0x16,
-        0x02, 0xF0, EOT,
-        S7_ID, 0x03, 0x00, 0x00,
-        0x05, 0x00,
-        0x00, 0x02,
-        0x00, 0x01,
-        0x00, 0x00,
-        FN_WRITE_VAR, 0x01,
+        ISO_ID,
+        0x00,
+        0x00,
+        0x16,
+        0x02,
+        0xF0,
+        EOT,
+        S7_ID,
+        0x03,
+        0x00,
+        0x00,
+        0x05,
+        0x00,
+        0x00,
+        0x02,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        FN_WRITE_VAR,
+        0x01,
         return_code,
     ]
 }
@@ -408,17 +540,29 @@ impl ParsedRequest {
 }
 
 pub fn parse_request(frame: &[u8]) -> ParsedRequest {
-    assert!(frame.len() >= READ_REQ_LEN, "frame too short: {} bytes", frame.len());
+    assert!(
+        frame.len() >= READ_REQ_LEN,
+        "frame too short: {} bytes",
+        frame.len()
+    );
     assert_eq!(frame[0], ISO_ID, "TPKT id");
     assert_eq!(&frame[4..7], &[0x02, 0xF0, EOT], "COTP data header");
     assert_eq!(frame[7], S7_ID, "S7 protocol id");
     assert_eq!(frame[8], 0x01, "S7 job");
-    assert_eq!(&frame[19..22], &[0x12, 0x0A, 0x10], "item var-spec / syntax id");
+    assert_eq!(
+        &frame[19..22],
+        &[0x12, 0x0A, 0x10],
+        "item var-spec / syntax id"
+    );
 
     let function = frame[17];
     let (transport, bit_count, payload) = if function == FN_WRITE_VAR {
         assert!(frame.len() >= WRITE_REQ_HEADER_LEN, "write frame too short");
-        (Some(frame[32]), Some(be16(frame, 33)), frame[WRITE_REQ_HEADER_LEN..].to_vec())
+        (
+            Some(frame[32]),
+            Some(be16(frame, 33)),
+            frame[WRITE_REQ_HEADER_LEN..].to_vec(),
+        )
     } else {
         (None, None, Vec::new())
     };

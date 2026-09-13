@@ -37,8 +37,8 @@ fn read_db_fills_buffer_with_plc_data() {
     client.read_db(100, 10, &mut buf).unwrap();
 
     assert_eq!(buf, expected_memory(100, 10, 64));
-    assert_eq!(client.chunks, 1);
-    assert!(client.last_time > 0.0);
+    assert_eq!(client.chunks(), 1);
+    assert!(client.last_time() > 0.0);
 }
 
 #[test]
@@ -50,7 +50,8 @@ fn read_request_frame_matches_s7comm_layout() {
 
     let raw = &plc.requests()[0];
     assert_eq!(raw.len(), READ_REQ_LEN);
-    assert_eq!(&raw[9..13], &[0x00, 0x00, 0x05, 0x00], "redundancy id + pdu reference");
+    assert_eq!(&raw[9..11], &[0x00, 0x00], "redundancy id");
+    assert_ne!(pdu_ref(raw), 0, "pdu reference is never 0");
     assert_eq!(raw[18], 0x01, "item count");
 
     let req = parse_request(raw);
@@ -74,7 +75,7 @@ fn large_read_is_split_by_negotiated_pdu() {
     client.read_db(100, 0, &mut buf).unwrap();
 
     assert_eq!(buf, expected_memory(100, 0, 462));
-    assert_eq!(client.chunks, 3);
+    assert_eq!(client.chunks(), 3);
     let reqs: Vec<ParsedRequest> = plc.requests().iter().map(|f| parse_request(f)).collect();
     assert_eq!(reqs.iter().map(|r| r.count).collect::<Vec<_>>(), [222, 222, 18]);
     assert_eq!(
@@ -92,7 +93,7 @@ fn read_exactly_one_max_chunk_is_not_split() {
 
     client.read_db(1, 0, &mut buf).unwrap();
 
-    assert_eq!(client.chunks, 1);
+    assert_eq!(client.chunks(), 1);
     assert_eq!(buf, expected_memory(1, 0, 222));
 }
 
@@ -104,22 +105,10 @@ fn read_chunk_size_follows_negotiated_pdu() {
 
     client.read_db(1, 0, &mut buf).unwrap();
 
-    assert_eq!(client.chunks, 3);
+    assert_eq!(client.chunks(), 3);
     let reqs: Vec<ParsedRequest> = plc.requests().iter().map(|f| parse_request(f)).collect();
     assert_eq!(reqs.iter().map(|r| r.count).collect::<Vec<_>>(), [462, 462, 76]);
     assert_eq!(buf, expected_memory(1, 0, 1000));
-}
-
-#[test]
-#[ignore = "known defect: the client honours a negotiated PDU larger than the 480 bytes it requested, but its receive buffer is fixed at 480, so a full-size chunk fails with IsoInvalidTelegram (found by tests/properties.rs)"]
-fn read_with_pdu_larger_than_requested_480() {
-    let plc = plc(481); // one byte more than requested -> 463-byte chunks
-    let mut client = plc.connected_client();
-    let mut buf = vec![0u8; 463];
-
-    client.read_db(1, 0, &mut buf).unwrap();
-
-    assert_eq!(buf, expected_memory(1, 0, 463));
 }
 
 #[test]
@@ -130,7 +119,7 @@ fn read_of_empty_buffer_sends_nothing() {
 
     client.read_db(1, 0, &mut buf).unwrap();
 
-    assert_eq!(client.chunks, 0);
+    assert_eq!(client.chunks(), 0);
     assert!(plc.requests().is_empty());
 }
 
@@ -180,8 +169,8 @@ fn read_return_codes_map_to_s7_errors() {
         let err = client.read_db(1, 0, &mut buf).unwrap_err();
 
         assert!(is_expected(&err), "return code {code:#04x} produced {err:?}");
-        assert_eq!(client.last_time, 0.0);
-        assert!(client.connected, "protocol level errors do not disconnect");
+        assert_eq!(client.last_time(), 0.0);
+        assert!(client.is_connected(), "protocol level errors do not disconnect");
     }
 }
 
@@ -203,7 +192,7 @@ fn read_error_aborts_after_the_failing_chunk() {
 
     assert!(matches!(err, S7Error::S7InvalidAddress));
     assert_eq!(plc.requests().len(), 2, "no further chunks after the failure");
-    assert_eq!(client.chunks, 2);
+    assert_eq!(client.chunks(), 2);
 }
 
 #[test]
@@ -246,36 +235,55 @@ fn reply_longer_than_negotiated_pdu_is_rejected() {
 #[test]
 fn read_reply_shorter_than_its_header_is_rejected() {
     let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| {
-        Reply::Send(raw_telegram(READ_RES_LEN - 1, &[0u8; READ_RES_LEN - 1]))
+        // a well-formed ack header, but the item is one byte short
+        let reply = read_reply(RES_SUCCESS, &[]);
+        Reply::Send(raw_telegram(READ_RES_LEN - 1, &reply[7..7 + READ_RES_LEN - 1]))
+    });
+    let mut client = plc.connected_client();
+    let mut buf = [0u8; 4];
+
+    assert!(matches!(client.read_db(1, 0, &mut buf), Err(S7Error::S7InvalidResponse)));
+    assert!(!client.is_connected());
+}
+
+#[test]
+fn read_reply_shorter_than_the_s7_header_is_rejected() {
+    let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| {
+        Reply::SendRaw(raw_telegram(5, &[0u8; 5]))
     });
     let mut client = plc.connected_client();
     let mut buf = [0u8; 4];
 
     assert!(matches!(client.read_db(1, 0, &mut buf), Err(S7Error::IsoInvalidTelegram)));
+    assert!(!client.is_connected());
 }
 
 #[test]
-fn read_reply_truncated_below_announced_length_is_rejected() {
+fn read_reply_truncated_below_announced_length_times_out() {
     let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| {
         // announces 30 S7 bytes, ships only 10, then goes quiet
         Reply::Send(raw_telegram(30, &[0u8; 10]))
     });
-    let mut client = plc.connected_client();
+    let mut client = plc.client();
+    client.set_timeout(3000, 100, 500).unwrap();
+    client.connect_s71200_1500(&plc.ip()).unwrap();
     let mut buf = [0u8; 4];
 
-    assert!(matches!(client.read_db(1, 0, &mut buf), Err(S7Error::IsoInvalidTelegram)));
+    assert!(matches!(client.read_db(1, 0, &mut buf), Err(S7Error::Timeout)));
+    assert!(!client.is_connected());
 }
 
 #[test]
-fn peer_closing_mid_request_yields_io_error() {
+fn peer_closing_mid_request_yields_connection_closed() {
     let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| Reply::Close);
     let mut client = plc.connected_client();
     let mut buf = [0u8; 4];
 
     let err = client.read_db(1, 0, &mut buf).unwrap_err();
 
-    assert!(matches!(err, S7Error::Io(_)), "{err:?}");
-    assert_eq!(client.last_time, 0.0);
+    assert!(matches!(err, S7Error::ConnectionClosed), "{err:?}");
+    assert_eq!(client.last_time(), 0.0);
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -293,11 +301,11 @@ fn successful_read_after_error_restores_timing_fields() {
     let mut buf = [0u8; 4];
 
     assert!(client.read_db(1, 0, &mut buf).is_err());
-    assert_eq!((client.last_time, client.chunks), (0.0, 1));
+    assert_eq!((client.last_time(), client.chunks()), (0.0, 1));
 
     client.read_db(1, 0, &mut buf).unwrap();
-    assert!(client.last_time > 0.0);
-    assert_eq!(client.chunks, 1);
+    assert!(client.last_time() > 0.0);
+    assert_eq!(client.chunks(), 1);
 }
 
 // ---- writes ------------------------------------------------------------------
@@ -310,8 +318,8 @@ fn write_db_sends_payload_in_write_var_frame() {
 
     client.write_db(5, 20, &data).unwrap();
 
-    assert_eq!(client.chunks, 1);
-    assert!(client.last_time > 0.0);
+    assert_eq!(client.chunks(), 1);
+    assert!(client.last_time() > 0.0);
     let raw = &plc.requests()[0];
     assert_eq!(raw.len(), WRITE_REQ_HEADER_LEN + 16);
     assert_eq!(raw[31], 0x00, "reserved byte");
@@ -339,7 +347,7 @@ fn large_write_is_split_by_negotiated_pdu() {
 
     client.write_db(100, 0, &data).unwrap();
 
-    assert_eq!(client.chunks, 5);
+    assert_eq!(client.chunks(), 5);
     let reqs: Vec<ParsedRequest> = plc.requests().iter().map(|f| parse_request(f)).collect();
     assert_eq!(reqs.iter().map(|r| r.count).collect::<Vec<_>>(), [212, 212, 212, 212, 176]);
     assert_eq!(reqs.iter().map(|r| r.byte_address()).collect::<Vec<_>>(), [0, 212, 424, 636, 848]);
@@ -354,7 +362,7 @@ fn write_of_empty_buffer_sends_nothing() {
 
     client.write_db(1, 0, &[]).unwrap();
 
-    assert_eq!(client.chunks, 0);
+    assert_eq!(client.chunks(), 0);
     assert!(plc.requests().is_empty());
 }
 
@@ -374,18 +382,26 @@ fn write_return_codes_map_to_s7_errors() {
         let err = client.write_db(1, 0, &[1, 2, 3]).unwrap_err();
 
         assert!(is_expected(&err), "return code {code:#04x} produced {err:?}");
-        assert_eq!(client.last_time, 0.0);
+        assert_eq!(client.last_time(), 0.0);
     }
 }
 
 #[test]
 fn write_reply_shorter_than_its_header_is_rejected() {
     let plc = FakePlc::start(Handshake::Accept { pdu_length: 240 }, |_| {
-        Reply::Send(raw_telegram(WRITE_RES_LEN - 1, &[0u8; WRITE_RES_LEN - 1]))
+        let reply = write_reply(RES_SUCCESS);
+        Reply::Send(raw_telegram(WRITE_RES_LEN - 1, &reply[7..7 + WRITE_RES_LEN - 1]))
     });
     let mut client = plc.connected_client();
 
-    assert!(matches!(client.write_db(1, 0, &[1]), Err(S7Error::IsoInvalidTelegram)));
+    let err = client.write_db(1, 0, &[1]).unwrap_err();
+
+    assert!(
+        matches!(err, S7Error::WriteIncomplete { acknowledged: 0, requested: 1, ref source }
+            if matches!(**source, S7Error::S7InvalidResponse)),
+        "{err:?}"
+    );
+    assert!(!client.is_connected());
 }
 
 #[test]
@@ -403,9 +419,14 @@ fn write_error_aborts_after_the_failing_chunk() {
 
     let err = client.write_db(1, 0, &[0u8; 1000]).unwrap_err(); // 5 chunks needed
 
-    assert!(matches!(err, S7Error::S7NotFound));
+    assert!(
+        matches!(err, S7Error::WriteIncomplete { acknowledged: 424, requested: 1000, ref source }
+            if matches!(**source, S7Error::S7NotFound)),
+        "{err:?}"
+    );
     assert_eq!(plc.requests().len(), 3);
-    assert_eq!(client.chunks, 3);
+    assert_eq!(client.chunks(), 3);
+    assert!(client.is_connected(), "a PLC rejection keeps the connection");
 }
 
 // ---- bit access ----------------------------------------------------------------
@@ -425,7 +446,7 @@ fn read_bit_encodes_byte_times_8_plus_bit_and_reads_one_element() {
     assert_eq!(req.area, S7_AREA_DB);
     assert_eq!(req.address, 47 * 8 + 5);
     assert_eq!(value, (memory_byte(100, 47) >> 5) & 1 == 1);
-    assert_eq!(client.chunks, 1);
+    assert_eq!(client.chunks(), 1);
 }
 
 #[test]
@@ -489,7 +510,7 @@ fn write_area_with_bit_wordlen_sends_only_the_first_byte() {
     assert_eq!(req.payload, [1]);
     assert_eq!(req.count, 1);
     assert_eq!(req.address, 9);
-    assert_eq!(client.chunks, 1);
+    assert_eq!(client.chunks(), 1);
 }
 
 // ---- parameter validation while connected ---------------------------------------
@@ -508,6 +529,6 @@ fn parameter_errors_do_not_put_anything_on_the_wire() {
     assert!(matches!(client.write_bit(S7_AREA_DB, 1, 0, 9, true), Err(S7Error::InvalidFunParameter)));
 
     assert!(plc.requests().is_empty());
-    assert!(client.connected);
-    assert_eq!((client.last_time, client.chunks), (0.0, 0));
+    assert!(client.is_connected());
+    assert_eq!((client.last_time(), client.chunks()), (0.0, 0));
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rust7"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Davide Nardella <davenardella@live.it>"]
 edition = "2021"
 description = "Native Rust S7 client (Snap7-style) for Siemens PLCs."
