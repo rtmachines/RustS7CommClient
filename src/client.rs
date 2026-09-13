@@ -367,8 +367,8 @@ impl S7Client {
     /// - `remote_tsap` : Server TSAP (PLC).
     /// 
     /// ### Notes
-    ///     The connection port used is 102 (S7Protocol Port) unless you
-    ///     changed it via set_connection_port()
+    /// The connection port used is 102 (S7Protocol Port) unless you
+    /// changed it via `set_connection_port()`
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `S7Error` on failure.
@@ -476,7 +476,7 @@ impl S7Client {
     /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
     /// 
     /// ### Notes
-    ///     A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
+    /// A Client should be disconnected on low-level error (see `read_area()` and `write_area()` suggestion)
     /// 
     pub fn disconnect(&mut self) {
         if self.connected {
@@ -862,7 +862,9 @@ impl S7Client {
     /// ### Example
     /// To read DB10.DBX71.4 use:
     /// 
-    /// ```my_bit = read_bit(S7_AREA_DB, 10, 71, 4);```
+    /// ```text
+    /// my_bit = read_bit(S7_AREA_DB, 10, 71, 4);
+    /// ```
     /// 
     /// ### Returns
     /// `Ok(<bool>)` or `Err(<S7Error>)`
@@ -872,11 +874,10 @@ impl S7Client {
     /// - Other reported by read_area()
     /// 
     /// ### Suggestion
-    ///   
-    ///     Even reading a single bit requires an entire telegram.
-    ///     Since reading is non-invasive, if you need to read multiple bits 
-    ///     (more or less adjacent in the same area), I recommend reading blocks 
-    ///     of bytes and then unpacking them.
+    /// Even reading a single bit requires an entire telegram.
+    /// Since reading is non-invasive, if you need to read multiple bits
+    /// (more or less adjacent in the same area), I recommend reading blocks
+    /// of bytes and then unpacking them.
     /// ---
     /// For further info, please refer to `read_area()`
     /// 
@@ -930,7 +931,9 @@ impl S7Client {
     /// ### Example
     /// To write **1** into DB10.DBX71.4 use:
     /// 
-    /// ```write_bit(S7_AREA_DB, 10, 71, 4, true);```
+    /// ```text
+    /// write_bit(S7_AREA_DB, 10, 71, 4, true);
+    /// ```
     /// 
     /// ### Returns
     /// `Ok(())` Operation succeeded.
@@ -940,7 +943,7 @@ impl S7Client {
     /// - Other reported by read_area()
     /// 
     /// ### Notes
-    ///     Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged. 
+    /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
     /// ---
     /// For further info, please refer to `write_area()`
     /// 
@@ -961,5 +964,459 @@ impl S7Client {
 impl Drop for S7Client {
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+// ---------------------------------------------------------------------------
+// Unit tests for the private building blocks (macros, ISO header validation,
+// parameter validation). Network behaviour is covered by the integration tests
+// in `tests/` against an in-process fake PLC.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- byte helpers -----------------------------------------------------
+
+    #[test]
+    fn hi_lo_split_and_make_u16_agree_on_known_values() {
+        assert_eq!(hi_part!(0x1234u16), 0x12);
+        assert_eq!(lo_part!(0x1234u16), 0x34);
+        assert_eq!(make_u16!(0x12u8, 0x34u8), 0x1234);
+        assert_eq!(make_u16!(0xFFu8, 0xFFu8), u16::MAX);
+        assert_eq!(make_u16!(0x00u8, 0x00u8), 0);
+        // usize inputs (used for telegram lengths) must work too
+        assert_eq!(hi_part!(ISO_CR_LEN), 0x00);
+        assert_eq!(lo_part!(ISO_CR_LEN), 22);
+        assert_eq!(hi_part!(0x1FFusize), 0x01);
+        assert_eq!(lo_part!(0x1FFusize), 0xFF);
+    }
+
+    proptest! {
+        #[test]
+        fn make_u16_inverts_hi_lo_split(x in any::<u16>()) {
+            prop_assert_eq!(make_u16!(hi_part!(x), lo_part!(x)), x);
+        }
+
+        #[test]
+        fn hi_lo_are_the_big_endian_bytes(x in any::<u16>()) {
+            let be = x.to_be_bytes();
+            prop_assert_eq!(hi_part!(x), be[0]);
+            prop_assert_eq!(lo_part!(x), be[1]);
+        }
+    }
+
+    // ---- check_iso_packet -------------------------------------------------
+
+    fn iso_header(telegram_len: u16) -> [u8; TPKT_ISO_LEN] {
+        [ISO_ID, 0x00, hi_part!(telegram_len), lo_part!(telegram_len), 0x02, 0xF0, EOT]
+    }
+
+    #[test]
+    fn iso_packet_returns_remaining_bytes_for_valid_header() {
+        let mut pkt = iso_header(25);
+        assert_eq!(check_iso_packet(240, &mut pkt).unwrap(), 18);
+    }
+
+    #[test]
+    fn iso_packet_accepts_payload_exactly_filling_pdu() {
+        let mut pkt = iso_header(TPKT_ISO_LEN as u16 + 240);
+        assert_eq!(check_iso_packet(240, &mut pkt).unwrap(), 240);
+    }
+
+    #[test]
+    fn iso_packet_rejects_payload_exceeding_pdu() {
+        let mut pkt = iso_header(TPKT_ISO_LEN as u16 + 241);
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidTelegram)));
+    }
+
+    #[test]
+    fn iso_packet_rejects_empty_payload() {
+        let mut pkt = iso_header(TPKT_ISO_LEN as u16);
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidTelegram)));
+    }
+
+    #[test]
+    fn iso_packet_rejects_length_below_header_size_without_underflow() {
+        for len in 0..TPKT_ISO_LEN as u16 {
+            let mut pkt = iso_header(len);
+            assert!(
+                matches!(check_iso_packet(u16::MAX, &mut pkt), Err(S7Error::IsoInvalidTelegram)),
+                "telegram length {len} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn iso_packet_rejects_wrong_rfc1006_id() {
+        let mut pkt = iso_header(25);
+        pkt[0] = 0x04;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidHeader)));
+    }
+
+    #[test]
+    fn iso_packet_rejects_wrong_cotp_length() {
+        let mut pkt = iso_header(25);
+        pkt[4] = 0x03;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidHeader)));
+    }
+
+    #[test]
+    fn iso_packet_rejects_wrong_cotp_pdu_type() {
+        let mut pkt = iso_header(25);
+        pkt[5] = 0xE0;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidHeader)));
+    }
+
+    #[test]
+    fn iso_packet_ignores_reserved_byte() {
+        let mut pkt = iso_header(25);
+        pkt[1] = 0xAB;
+        assert_eq!(check_iso_packet(240, &mut pkt).unwrap(), 18);
+    }
+
+    #[test]
+    fn iso_packet_reports_fragmentation_when_eot_is_missing() {
+        let mut pkt = iso_header(25);
+        pkt[6] = 0x00;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoFragmentedPacket)));
+    }
+
+    #[test]
+    fn iso_packet_header_error_takes_precedence_over_fragmentation() {
+        let mut pkt = iso_header(25);
+        pkt[0] = 0x00;
+        pkt[6] = 0x00;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoInvalidHeader)));
+    }
+
+    #[test]
+    fn iso_packet_fragmentation_takes_precedence_over_bad_length() {
+        let mut pkt = iso_header(0);
+        pkt[6] = 0x00;
+        assert!(matches!(check_iso_packet(240, &mut pkt), Err(S7Error::IsoFragmentedPacket)));
+    }
+
+    /// Executable specification of `check_iso_packet`, used as an oracle.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        Ok(usize),
+        InvalidHeader,
+        Fragmented,
+        InvalidTelegram,
+    }
+
+    fn model(pdu_length: u16, p: &[u8; TPKT_ISO_LEN]) -> Outcome {
+        if p[0] != ISO_ID || p[4] != 0x02 || p[5] != 0xF0 {
+            return Outcome::InvalidHeader;
+        }
+        if p[6] != EOT {
+            return Outcome::Fragmented;
+        }
+        let len = u16::from_be_bytes([p[2], p[3]]) as usize;
+        match len.checked_sub(TPKT_ISO_LEN) {
+            Some(payload) if payload >= 1 && payload <= pdu_length as usize => Outcome::Ok(payload),
+            _ => Outcome::InvalidTelegram,
+        }
+    }
+
+    fn outcome(r: Result<usize, S7Error>) -> Outcome {
+        match r {
+            Ok(n) => Outcome::Ok(n),
+            Err(S7Error::IsoInvalidHeader) => Outcome::InvalidHeader,
+            Err(S7Error::IsoFragmentedPacket) => Outcome::Fragmented,
+            Err(S7Error::IsoInvalidTelegram) => Outcome::InvalidTelegram,
+            Err(e) => panic!("check_iso_packet must never return {e:?}"),
+        }
+    }
+
+    /// Mostly-valid headers, so that all branches get exercised instead of
+    /// almost always failing on the first check.
+    fn iso_packet_strategy() -> impl Strategy<Value = [u8; TPKT_ISO_LEN]> {
+        (
+            prop_oneof![3 => Just(ISO_ID), 1 => any::<u8>()],
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+            prop_oneof![3 => Just(0x02u8), 1 => any::<u8>()],
+            prop_oneof![3 => Just(0xF0u8), 1 => any::<u8>()],
+            prop_oneof![3 => Just(EOT), 1 => any::<u8>()],
+        )
+            .prop_map(|(a, b, c, d, e, f, g)| [a, b, c, d, e, f, g])
+    }
+
+    proptest! {
+        #[test]
+        fn iso_packet_matches_reference_model(pdu in any::<u16>(), mut pkt in iso_packet_strategy()) {
+            let expected = model(pdu, &pkt);
+            prop_assert_eq!(outcome(check_iso_packet(pdu, &mut pkt)), expected);
+        }
+
+        #[test]
+        fn iso_packet_never_panics_on_arbitrary_input(pdu in any::<u16>(), mut pkt in any::<[u8; TPKT_ISO_LEN]>()) {
+            let _ = check_iso_packet(pdu, &mut pkt);
+        }
+
+        #[test]
+        fn iso_packet_does_not_mutate_its_input(pdu in any::<u16>(), mut pkt in iso_packet_strategy()) {
+            let original = pkt;
+            let _ = check_iso_packet(pdu, &mut pkt);
+            prop_assert_eq!(pkt, original);
+        }
+
+        #[test]
+        fn valid_header_is_ok_iff_payload_within_1_and_pdu(pdu in any::<u16>(), len in any::<u16>()) {
+            let mut pkt = iso_header(len);
+            let result = check_iso_packet(pdu, &mut pkt);
+            match (len as usize).checked_sub(TPKT_ISO_LEN) {
+                Some(payload) if payload >= 1 && payload <= pdu as usize => {
+                    prop_assert_eq!(result.unwrap(), payload);
+                }
+                _ => prop_assert!(matches!(result, Err(S7Error::IsoInvalidTelegram))),
+            }
+        }
+    }
+
+    // ---- constructor & configuration -------------------------------------
+
+    #[test]
+    fn new_client_has_documented_defaults() {
+        let c = S7Client::new();
+        assert!(!c.connected);
+        assert!(c.stream.is_none());
+        assert_eq!(c.port, 102);
+        assert_eq!(c.co_timeout_ms, 3000);
+        assert_eq!(c.rd_timeout_ms, 1000);
+        assert_eq!(c.wr_timeout_ms, 500);
+        assert_eq!(c.conn_type, CT_PG);
+        assert_eq!(c.pdu_length, 0);
+        assert_eq!(c.max_rd_pdu_data, 0);
+        assert_eq!(c.max_wr_pdu_data, 0);
+        assert_eq!(c.last_time, 0.0);
+        assert_eq!(c.chunks, 0);
+    }
+
+    #[test]
+    fn set_connection_type_accepts_every_documented_type() {
+        let mut c = S7Client::new();
+        for ct in [CT_PG, CT_OP, CT_S7] {
+            assert!(c.set_connection_type(ct).is_ok());
+            assert_eq!(c.conn_type, ct);
+        }
+    }
+
+    #[test]
+    fn set_connection_type_rejects_out_of_range_and_keeps_previous_value() {
+        let mut c = S7Client::new();
+        c.set_connection_type(CT_OP).unwrap();
+        for bad in [0u16, 4, 0x0100, u16::MAX] {
+            assert!(
+                matches!(c.set_connection_type(bad), Err(S7Error::InvalidFunParameter)),
+                "connection type {bad:#06x} must be rejected"
+            );
+            assert_eq!(c.conn_type, CT_OP);
+        }
+    }
+
+    #[test]
+    fn set_timeout_stores_all_three_values() {
+        let mut c = S7Client::new();
+        c.set_timeout(1, 2, 3).unwrap();
+        assert_eq!((c.co_timeout_ms, c.rd_timeout_ms, c.wr_timeout_ms), (1, 2, 3));
+    }
+
+    #[test]
+    fn set_timeout_rejects_any_zero_and_changes_nothing() {
+        let mut c = S7Client::new();
+        for (co, rd, wr) in [(0, 1, 1), (1, 0, 1), (1, 1, 0), (0, 0, 0)] {
+            assert!(matches!(c.set_timeout(co, rd, wr), Err(S7Error::InvalidFunParameter)));
+            assert_eq!((c.co_timeout_ms, c.rd_timeout_ms, c.wr_timeout_ms), (3000, 1000, 500));
+        }
+    }
+
+    #[test]
+    fn set_connection_port_stores_value() {
+        let mut c = S7Client::new();
+        c.set_connection_port(1102).unwrap();
+        assert_eq!(c.port, 1102);
+        c.set_connection_port(u16::MAX).unwrap();
+        assert_eq!(c.port, u16::MAX);
+    }
+
+    #[test]
+    fn set_connection_port_rejects_zero_and_keeps_previous_value() {
+        let mut c = S7Client::new();
+        assert!(matches!(c.set_connection_port(0), Err(S7Error::InvalidFunParameter)));
+        assert_eq!(c.port, 102);
+    }
+
+    #[test]
+    fn check_area_accepts_only_the_four_documented_areas() {
+        let mut c = S7Client::new();
+        for area in u8::MIN..=u8::MAX {
+            let expected_ok = [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB].contains(&area);
+            assert_eq!(c.check_area(area).is_ok(), expected_ok, "area {area:#04x}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn set_connection_type_is_valid_iff_between_pg_and_s7(ct in any::<u16>()) {
+            let mut c = S7Client::new();
+            prop_assert_eq!(c.set_connection_type(ct).is_ok(), (CT_PG..=CT_S7).contains(&ct));
+        }
+
+        #[test]
+        fn set_timeout_is_valid_iff_all_values_are_nonzero(co in any::<u64>(), rd in any::<u64>(), wr in any::<u64>()) {
+            let mut c = S7Client::new();
+            prop_assert_eq!(c.set_timeout(co, rd, wr).is_ok(), co != 0 && rd != 0 && wr != 0);
+        }
+
+        #[test]
+        fn set_connection_port_is_valid_iff_nonzero(port in any::<u16>()) {
+            let mut c = S7Client::new();
+            prop_assert_eq!(c.set_connection_port(port).is_ok(), port != 0);
+        }
+    }
+
+    // ---- offline behaviour of the data API --------------------------------
+
+    #[test]
+    fn disconnect_on_never_connected_client_is_a_noop() {
+        let mut c = S7Client::new();
+        c.disconnect();
+        c.disconnect();
+        assert!(!c.connected);
+        assert!(c.stream.is_none());
+    }
+
+    #[test]
+    fn dropping_an_unconnected_client_does_not_panic() {
+        drop(S7Client::new());
+    }
+
+    #[test]
+    fn read_area_reports_invalid_area_before_checking_connection() {
+        let mut c = S7Client::new();
+        let mut buf = [0u8; 4];
+        assert!(matches!(
+            c.read_area(0x00, 1, 0, S7_WL_BYTE, &mut buf),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+
+    #[test]
+    fn read_area_reports_invalid_wordlen_before_checking_connection() {
+        let mut c = S7Client::new();
+        let mut buf = [0u8; 4];
+        for wordlen in [0x00u8, 0x03, 0x04, 0xFF] {
+            assert!(matches!(
+                c.read_area(S7_AREA_DB, 1, 0, wordlen, &mut buf),
+                Err(S7Error::InvalidFunParameter)
+            ));
+        }
+    }
+
+    #[test]
+    fn read_area_with_valid_parameters_reports_not_connected() {
+        let mut c = S7Client::new();
+        let mut buf = [0u8; 4];
+        for area in [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB] {
+            for wordlen in [S7_WL_BIT, S7_WL_BYTE] {
+                assert!(matches!(
+                    c.read_area(area, 1, 0, wordlen, &mut buf),
+                    Err(S7Error::NotConnected)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn write_area_reports_invalid_area_before_checking_connection() {
+        let mut c = S7Client::new();
+        assert!(matches!(
+            c.write_area(0x85, 1, 0, S7_WL_BYTE, &[0u8; 4]),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+
+    #[test]
+    fn write_area_reports_invalid_wordlen_before_checking_connection() {
+        let mut c = S7Client::new();
+        assert!(matches!(
+            c.write_area(S7_AREA_DB, 1, 0, 0x03, &[0u8; 4]),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+
+    #[test]
+    fn write_area_with_valid_parameters_reports_not_connected() {
+        let mut c = S7Client::new();
+        assert!(matches!(
+            c.write_area(S7_AREA_MK, 0, 0, S7_WL_BYTE, &[0u8; 4]),
+            Err(S7Error::NotConnected)
+        ));
+    }
+
+    #[test]
+    fn read_db_and_write_db_delegate_to_area_functions() {
+        let mut c = S7Client::new();
+        let mut buf = [0u8; 4];
+        assert!(matches!(c.read_db(1, 0, &mut buf), Err(S7Error::NotConnected)));
+        assert!(matches!(c.write_db(1, 0, &buf), Err(S7Error::NotConnected)));
+    }
+
+    #[test]
+    fn read_bit_rejects_every_bit_index_above_7() {
+        let mut c = S7Client::new();
+        for bit in 8u8..=u8::MAX {
+            assert!(
+                matches!(c.read_bit(S7_AREA_DB, 1, 0, bit), Err(S7Error::InvalidFunParameter)),
+                "bit index {bit}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_bit_rejects_every_bit_index_above_7() {
+        let mut c = S7Client::new();
+        for bit in 8u8..=u8::MAX {
+            assert!(
+                matches!(c.write_bit(S7_AREA_DB, 1, 0, bit, true), Err(S7Error::InvalidFunParameter)),
+                "bit index {bit}"
+            );
+        }
+    }
+
+    #[test]
+    fn bit_access_with_valid_index_reports_not_connected() {
+        let mut c = S7Client::new();
+        for bit in 0u8..=7 {
+            assert!(matches!(c.read_bit(S7_AREA_DB, 1, 8191, bit), Err(S7Error::NotConnected)));
+            assert!(matches!(c.write_bit(S7_AREA_DB, 1, 8191, bit, false), Err(S7Error::NotConnected)));
+        }
+    }
+
+    #[test]
+    #[ignore = "known defect: byte_num * 8 + bit_idx overflows u16 for byte_num >= 8192 (panics in debug, wraps silently in release)"]
+    fn bit_access_rejects_byte_number_whose_bit_address_overflows_u16() {
+        let mut c = S7Client::new();
+        assert!(matches!(c.read_bit(S7_AREA_DB, 1, 8192, 0), Err(S7Error::InvalidFunParameter)));
+        assert!(matches!(c.write_bit(S7_AREA_DB, 1, u16::MAX, 7, true), Err(S7Error::InvalidFunParameter)));
+    }
+
+    #[test]
+    fn failed_read_and_write_reset_last_time_and_chunks() {
+        let mut c = S7Client::new();
+        c.last_time = 5.0;
+        c.chunks = 3;
+        let mut buf = [0u8; 4];
+        assert!(c.read_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, &mut buf).is_err());
+        assert_eq!((c.last_time, c.chunks), (0.0, 0));
+
+        c.last_time = 5.0;
+        c.chunks = 3;
+        assert!(c.write_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, &buf).is_err());
+        assert_eq!((c.last_time, c.chunks), (0.0, 0));
     }
 }
