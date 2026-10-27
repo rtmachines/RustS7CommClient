@@ -3,7 +3,7 @@ use rust7::client::S7Client;
 
 fn read_byte_s7(s7_client: &mut S7Client, db_number: u16) {
     // Reads 16 byte from DB1
-    println!("");
+    println!();
     println!("Attempt to read 16 byte from DB1");
     let mut read_buffer = vec![0u8; 16];
 
@@ -18,13 +18,10 @@ fn read_byte_s7(s7_client: &mut S7Client, db_number: u16) {
 
             for (i, chunk) in read_buffer.chunks(32).enumerate() {
                 print!("{:04X}: ", i * 32); // Hex value
-                let mut index = 0;
-
-                for (_, plc_byte) in chunk.iter().enumerate() {
+                for (index, plc_byte) in chunk.iter().enumerate() {
                     print!("{:02X} ", plc_byte); // Dec value
 
                     ascii_bytes[index] = *plc_byte;
-                    index += 1;
                 }
 
                 println!();
@@ -42,7 +39,7 @@ fn read_byte_s7(s7_client: &mut S7Client, db_number: u16) {
 
 fn read_byte_s7_second_db(s7_client: &mut S7Client, db_number: u16) {
     // Reads 16 byte from DB2
-    println!("");
+    println!();
     println!("Attempt to read 16 byte from DB2");
     let mut read_buffer = vec![0u8; 16];
 
@@ -57,13 +54,10 @@ fn read_byte_s7_second_db(s7_client: &mut S7Client, db_number: u16) {
 
             for (i, chunk) in read_buffer.chunks(32).enumerate() {
                 print!("{:04X}: ", i * 32); // Hex value
-                let mut index = 0;
-
-                for (_, plc_byte) in chunk.iter().enumerate() {
+                for (index, plc_byte) in chunk.iter().enumerate() {
                     print!("{:02X} ", plc_byte); // Dec value
 
                     ascii_bytes[index] = *plc_byte;
-                    index += 1;
                 }
 
                 println!();
@@ -126,7 +120,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
 
 fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
     // Writes 16 byte to DB2, INTENTIONALLY to demonstrate for new people to learn to filter out NULL Values
-    println!("");
+    println!();
     println!("Attempt to write 16 byte to DB2");
     let text: &str = "Bye, S7!";
     let ascii_bytes = text.as_bytes(); // Convert string to ASCII bytes
@@ -134,7 +128,7 @@ fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
         println!("{}", byte); // Print each ASCII byte value
     }
 
-    match s7_client.write_db(db_number, 0, &ascii_bytes) {
+    match s7_client.write_db(db_number, 0, ascii_bytes) {
         Ok(_) => {
             println!("Success!");
             println!("Job time (ms) : {:.3}", s7_client.last_time);
@@ -146,7 +140,7 @@ fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
 
 fn write_bit_s7(s7_client: &mut S7Client, db_number: u16) {
     // Write a bit
-    println!("");
+    println!();
     println!("Attempt to write 'false' into DB1.DBX72.7"); // 01001000, will be true since because index exists (Counting <- (7,6,5,4,3,2,1,0))
     match s7_client.write_bit(client::S7_AREA_DB, db_number, 16, 0, true) {
         Ok(_) => {
@@ -182,6 +176,6 @@ fn main() {
     write_bit_s7(&mut client, db_number);
 
     client.disconnect();
-    println!("");
+    println!();
     println!("Disconnected");
 }

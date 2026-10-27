@@ -512,4 +512,26 @@ pub chunks:  usize
 #### Indicates how many pieces the data to be read or written in the last operation was divided into
 Maybe you need to know it only for extreme tuning
 #### Note
-- If an error occurred the value will be 0
+- Reset at the start of each read/write; on error it includes chunks already attempted, including the failing chunk.
+
+
+## Transfer validation and limits
+
+Byte reads/writes process the entire buffer and split it by negotiated PDU size,
+including buffers larger than 65535 bytes. The last addressed byte must not exceed
+`0x1fffff`; a range exceeding the 24-bit bit address is rejected before I/O.
+Bit helpers support byte indices through 65535. A raw bit operation requires a
+nonempty buffer and uses only its first byte; an empty byte operation sends no
+telegram after parameter and connection validation.
+
+TCP segmentation is handled by reading complete TPKT frames. S7 response headers,
+request references, functions, lengths and item statuses are validated before data
+is copied or a write is acknowledged. Negotiated PDU sizes must satisfy
+`28 < size <= 480`, the range supported by this implementation. The public
+`pdu_length` field is diagnostic and cannot override internal limits.
+
+A multichunk write is not atomic: earlier chunks may have reached the PLC when a
+later chunk fails. No write is automatically retried. After a read error discard
+the destination buffer, since earlier chunks may have been copied. Reconnect after
+low-level communication errors. `chunks` records attempted chunks, including the
+failing attempt; parameter validation failures leave it zero.

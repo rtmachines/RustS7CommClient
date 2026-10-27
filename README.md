@@ -45,6 +45,25 @@ fn main() {
 }
 ```
 
+## Transfer behavior
+
+Byte reads and writes process the entire buffer, including lengths above 65535 bytes,
+using the negotiated PDU size. Address ranges are checked before the first request;
+the last byte must be at most `0x1fffff`. Bit helpers accept the full `u16` byte index
+and bit indices `0..=7`. Raw bit operations require a nonempty buffer and use its
+first byte. An empty byte transfer sends no request after parameter and connection
+checks.
+
+The client reads complete bounded TCP frames and validates S7 responses against the
+request, including the reference, operation and payload length. It returns an error
+for an incomplete or inconsistent response. Writes across multiple chunks are not
+atomic: an error can occur after earlier chunks have reached the PLC. The client does
+not automatically retry writes. Discard a read buffer after an error and reconnect
+after a low-level communication error.
+
+`pdu_length` is diagnostic; changing it does not override the internal negotiated
+limits. `chunks` counts attempted read/write chunks, including a failing chunk.
+
 ## Documentation
 The detailed documentation is <a href="doc/Documentation.md" target="_blank">here</a>.
 
