@@ -57,8 +57,13 @@ fn reply(reference: &[u8], function: u8, data: &[u8]) -> Vec<u8> {
 enum Scenario {
     Normal,
     BadPdu,
+    SmallTpdu(u8),
+    OversizedPdu(u8),
+    BadCotp,
     LateReply,
     PlcError,
+    AckError(bool),
+    MalformedAck(bool),
 }
 
 fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
@@ -67,18 +72,34 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     stream.set_nodelay(true)?;
     let cr = frame(&mut stream)?;
     assert_eq!(&cr[4..11], &[17, 0xe0, 0, 0, 0, 1, 0]);
-    send_split(
-        &mut stream,
-        &[
-            3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, 10, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
-        ],
-    )?;
+    assert_eq!(&cr[11..14], &[0xc0, 1, 10]);
+    let exponent = match scenario {
+        Scenario::SmallTpdu(exponent) | Scenario::OversizedPdu(exponent) => exponent,
+        Scenario::BadCotp => 11,
+        _ => 10,
+    };
+    let tpdu_limit = 1usize << exponent;
+    let cc = [
+        3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, exponent, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
+    ];
+    send_split(&mut stream, &cc)?;
+    if scenario == Scenario::BadCotp {
+        assert!(matches!(frame(&mut stream), Err(e) if e.kind() == io::ErrorKind::UnexpectedEof));
+        return Ok(());
+    }
     let pn = frame(&mut stream)?;
-    assert_eq!(&pn[17..], &[0xf0, 0, 0, 1, 0, 1, 1, 0xe0]);
-    let size = if scenario == Scenario::BadPdu {
-        28u16
-    } else {
-        240u16
+    assert_eq!(&pn[17..23], &[0xf0, 0, 0, 1, 0, 1]);
+    let offered = match exponent {
+        7 => 125u16,
+        8 => 253,
+        _ => 480,
+    };
+    assert_eq!(&pn[23..25], &offered.to_be_bytes());
+    let size = match scenario {
+        Scenario::BadPdu => 28u16,
+        Scenario::OversizedPdu(_) => offered + 1,
+        Scenario::SmallTpdu(_) => offered,
+        _ => 240,
     };
     let mut response = vec![
         3, 0, 0, 27, 2, 0xf0, 0x80, 0x32, 3, 0, 0, pn[11], pn[12], 0, 8, 0, 0, 0, 0, 0xf0, 0, 0, 1,
@@ -86,7 +107,8 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     ];
     response[25..27].copy_from_slice(&size.to_be_bytes());
     send_split(&mut stream, &response)?;
-    if scenario == Scenario::BadPdu {
+    if matches!(scenario, Scenario::BadPdu | Scenario::OversizedPdu(_)) {
+        assert!(matches!(frame(&mut stream), Err(e) if e.kind() == io::ErrorKind::UnexpectedEof));
         return Ok(());
     }
     let mut written = Vec::new();
@@ -99,13 +121,50 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         };
         reference = reference.wrapping_add(1);
         assert_eq!(&request[11..13], &reference.to_be_bytes());
+        assert!(request.len() - 4 <= tpdu_limit);
         let count = usize::from(u16::from_be_bytes([request[23], request[24]]));
+        if request[17] == 4 {
+            assert!(3 + 18 + count <= tpdu_limit);
+        }
         let address = u32::from_be_bytes([0, request[28], request[29], request[30]]);
         if request[22] == 1 {
             assert_eq!(address, 0x07ffff);
             assert_eq!(count, 1);
         }
         let first = reference == 1;
+        if first && matches!(scenario, Scenario::AckError(_) | Scenario::MalformedAck(_)) {
+            let writing = matches!(
+                scenario,
+                Scenario::AckError(true) | Scenario::MalformedAck(true)
+            );
+            assert_eq!(request[17], if writing { 5 } else { 4 });
+            let mut response = vec![
+                3,
+                0,
+                0,
+                19,
+                2,
+                0xf0,
+                0x80,
+                0x32,
+                2,
+                0,
+                0,
+                request[11],
+                request[12],
+                0,
+                0,
+                0,
+                0,
+                0x81,
+                4,
+            ];
+            if matches!(scenario, Scenario::MalformedAck(_)) {
+                response[12] ^= 1;
+            }
+            send_split(&mut stream, &response)?;
+            continue;
+        }
         if scenario == Scenario::LateReply {
             // Reply after the client's read timeout; the client is gone by then.
             thread::sleep(Duration::from_millis(400));
@@ -142,7 +201,9 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             }
             _ => panic!("unexpected request"),
         };
-        send_split(&mut stream, &reply(&request[11..13], request[17], &data))?;
+        let response = reply(&request[11..13], request[17], &data);
+        assert!(response.len() - 4 <= tpdu_limit);
+        send_split(&mut stream, &response)?;
     }
 }
 
@@ -172,10 +233,49 @@ fn run(scenario: Scenario) {
             client.set_timeout(1000, 200, 1000).unwrap();
         }
         let result = client.connect_s71200_1500("127.0.0.1");
-        if scenario == Scenario::BadPdu {
-            assert!(matches!(result, Err(S7Error::PduNegotiationFailed)));
+        if matches!(
+            scenario,
+            Scenario::BadPdu | Scenario::OversizedPdu(_) | Scenario::BadCotp
+        ) {
+            if scenario == Scenario::BadCotp {
+                assert!(matches!(result, Err(S7Error::IsoConnectionFailed)));
+            } else {
+                assert!(matches!(result, Err(S7Error::PduNegotiationFailed)));
+            }
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
+            assert!(matches!(
+                client.read_db(100, 0, &mut [0]),
+                Err(S7Error::NotConnected)
+            ));
+        } else if let Scenario::AckError(writing) | Scenario::MalformedAck(writing) = scenario {
+            result.unwrap();
+            let mut buffer = [0xaa; 600];
+            let result = if writing {
+                client.write_db(100, 0, &buffer)
+            } else {
+                client.read_db(100, 0, &mut buffer)
+            };
+            assert_eq!(buffer, [0xaa; 600]);
+            assert_eq!(client.chunks, 1);
+            assert_eq!(client.last_time, 0.0);
+            if matches!(scenario, Scenario::MalformedAck(_)) {
+                assert!(matches!(result, Err(S7Error::IsoInvalidTelegram)));
+                assert!(!client.connected);
+                assert_eq!(client.pdu_length, 0);
+                assert!(matches!(
+                    client.write_db(100, 0, &[1]),
+                    Err(S7Error::NotConnected)
+                ));
+            } else {
+                assert!(matches!(result, Err(S7Error::S7Unspecified)));
+                assert!(client.connected);
+                assert_eq!(client.pdu_length, 240);
+                let mut next = [0; 4];
+                client.read_db(100, 10, &mut next).unwrap();
+                assert_eq!(next, [10, 11, 12, 13]);
+                client.write_db(100, 0, &next).unwrap();
+            }
         } else if scenario == Scenario::LateReply {
             result.unwrap();
             let mut buffer = [0; 4];
@@ -201,6 +301,14 @@ fn run(scenario: Scenario) {
             assert_eq!(buffer, [0, 1, 2, 3]);
         } else {
             result.unwrap();
+            assert_eq!(
+                client.pdu_length,
+                match scenario {
+                    Scenario::SmallTpdu(7) => 125,
+                    Scenario::SmallTpdu(8) => 253,
+                    _ => 240,
+                }
+            );
             assert!(matches!(
                 client.connect_rack_slot("127.0.0.1", 8, 0),
                 Err(S7Error::InvalidFunParameter)
@@ -246,4 +354,42 @@ fn late_reply_disconnects_client() {
 #[ignore = "requires permission to open loopback sockets"]
 fn plc_error_keeps_connection() {
     run(Scenario::PlcError);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn small_tpdu_bounds_reads_and_writes() {
+    for exponent in [7, 8] {
+        run(Scenario::SmallTpdu(exponent));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn oversized_negotiation_keeps_client_disconnected() {
+    for exponent in [7, 8] {
+        run(Scenario::OversizedPdu(exponent));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn invalid_cotp_limit_keeps_client_disconnected() {
+    run(Scenario::BadCotp);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn terminal_error_ack_keeps_connection_for_next_read_and_write() {
+    for writing in [false, true] {
+        run(Scenario::AckError(writing));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn malformed_ack_disconnects_client() {
+    for writing in [false, true] {
+        run(Scenario::MalformedAck(writing));
+    }
 }

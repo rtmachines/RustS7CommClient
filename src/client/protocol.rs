@@ -36,11 +36,16 @@ impl PduLimits {
 
 pub(super) fn negotiate<T: FrameRead + Write>(
     io: &mut T,
+    tpdu_limit: u16,
     timeout: Duration,
 ) -> Result<PduLimits, S7Error> {
-    io.write_all(&[
+    // CC validation guarantees at least 128 bytes, including the COTP header.
+    let requested_pdu = 480.min(tpdu_limit - 3);
+    let mut request = [
         3, 0, 0, 25, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 4, 0, 0, 8, 0, 0, 0xf0, 0, 0, 1, 0, 1, 1, 0xe0,
-    ])?;
+    ];
+    request[23..25].copy_from_slice(&requested_pdu.to_be_bytes());
+    io.write_all(&request)?;
     let frame = read_tpkt(io, 487, timeout)?;
     let pdu = data_payload(&frame).map_err(|_| S7Error::PduNegotiationFailed)?;
     // One outstanding job in each direction was requested; all these fields
@@ -49,7 +54,11 @@ pub(super) fn negotiate<T: FrameRead + Write>(
     {
         return Err(S7Error::PduNegotiationFailed);
     }
-    PduLimits::new(u16::from_be_bytes([pdu[18], pdu[19]]))
+    let pdu_length = u16::from_be_bytes([pdu[18], pdu[19]]);
+    if pdu_length > requested_pdu {
+        return Err(S7Error::PduNegotiationFailed);
+    }
+    PduLimits::new(pdu_length)
 }
 
 pub(super) fn read_tpkt<R: FrameRead>(
@@ -118,7 +127,7 @@ pub(super) fn data_payload(frame: &[u8]) -> Result<&[u8], S7Error> {
     Ok(&frame[7..])
 }
 
-pub(super) fn validate_connection_confirm(frame: &[u8]) -> Result<(), S7Error> {
+pub(super) fn validate_connection_confirm(frame: &[u8]) -> Result<u16, S7Error> {
     if !valid_tpkt(frame)
         || frame.len() < 11
         || usize::from(frame[4]) + 5 != frame.len()
@@ -129,6 +138,7 @@ pub(super) fn validate_connection_confirm(frame: &[u8]) -> Result<(), S7Error> {
         return Err(S7Error::IsoConnectionFailed);
     }
     let mut offset = 11;
+    let mut tpdu_limit = None;
     while offset < frame.len() {
         if offset + 2 > frame.len() {
             return Err(S7Error::IsoConnectionFailed);
@@ -137,14 +147,23 @@ pub(super) fn validate_connection_confirm(frame: &[u8]) -> Result<(), S7Error> {
         if offset + 2 + len > frame.len() {
             return Err(S7Error::IsoConnectionFailed);
         }
+        if frame[offset] == 0xc0 {
+            if tpdu_limit.is_some() || len != 1 || !(7..=10).contains(&frame[offset + 2]) {
+                return Err(S7Error::IsoConnectionFailed);
+            }
+            tpdu_limit = Some(1u16 << frame[offset + 2]);
+        }
         offset += 2 + len;
     }
-    Ok(())
+    // Without C0, retain our local 1024-byte send cap for compatibility.
+    Ok(tpdu_limit.unwrap_or(1024))
 }
 
 fn ack_data(pdu: &[u8], reference: u16, function: u8) -> Result<&[u8], S7Error> {
     if pdu.len() < 12
-        || pdu[..4] != [0x32, 3, 0, 0]
+        || pdu[0] != 0x32
+        || !matches!(pdu[1], 2 | 3)
+        || pdu[2..4] != [0, 0]
         || u16::from_be_bytes([pdu[4], pdu[5]]) != reference
     {
         return Err(S7Error::IsoInvalidTelegram);
@@ -153,6 +172,15 @@ fn ack_data(pdu: &[u8], reference: u16, function: u8) -> Result<&[u8], S7Error> 
     let data = usize::from(u16::from_be_bytes([pdu[8], pdu[9]]));
     if 12 + params + data != pdu.len() {
         return Err(S7Error::IsoInvalidTelegram);
+    }
+    if pdu[1] == 2 {
+        // Only a header-only error ACK completes the job. An empty success ACK
+        // does not confirm that a read or write was performed.
+        return if params == 0 && data == 0 && pdu[10..12] != [0, 0] {
+            Err(S7Error::S7Unspecified)
+        } else {
+            Err(S7Error::IsoInvalidTelegram)
+        };
     }
     if pdu[10..12] != [0, 0] {
         return Err(S7Error::S7Unspecified);

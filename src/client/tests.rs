@@ -108,6 +108,39 @@ fn only_transport_errors_break_the_session() {
 }
 
 #[test]
+fn finish_preserves_session_only_for_valid_error_ack() {
+    for writing in [false, true] {
+        for malformed in [false, true] {
+            let mut client = S7Client::new();
+            client.connected = true;
+            client.pdu_length = 125;
+            client.limits = Some(protocol::PduLimits::new(125).unwrap());
+            let mut pdu = [0x32, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0x81, 4];
+            if malformed {
+                pdu[5] = 2; // A PLC error with the wrong reference is a framing error.
+            }
+            let result = if writing {
+                protocol::validate_write_response(&pdu, 1)
+            } else {
+                protocol::validate_read_response(&pdu, 1, 2, 4).map(|_| ())
+            };
+            let error = client.finish(result, Instant::now()).unwrap_err();
+            if malformed {
+                assert!(matches!(error, S7Error::IsoInvalidTelegram));
+                assert!(!client.connected);
+                assert!(client.limits.is_none());
+                assert_eq!(client.pdu_length, 0);
+            } else {
+                assert!(matches!(error, S7Error::S7Unspecified));
+                assert!(client.connected);
+                assert_eq!(client.limits.unwrap().pdu_length, 125);
+                assert_eq!(client.pdu_length, 125);
+            }
+        }
+    }
+}
+
+#[test]
 fn s7_error_is_std_error_with_io_source() {
     let err: Box<dyn std::error::Error> = Box::new(S7Error::from(std::io::Error::from(
         std::io::ErrorKind::TimedOut,

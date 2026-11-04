@@ -54,12 +54,17 @@ and bit indices `0..=7`. Raw bit operations require a nonempty buffer and use it
 first byte. An empty byte transfer sends no request after parameter and connection
 checks.
 
+The S7 PDU offer is capped at 480 bytes and reduced for small COTP TPDU limits so
+each request and expected response fits in one TPDU. COTP fragmentation is unsupported.
+
 The client reads complete bounded TCP frames and validates S7 responses against the
 request, including the reference, operation and payload length. It returns an error
 for an incomplete or inconsistent response. Writes across multiple chunks are not
 atomic: an error can occur after earlier chunks have reached the PLC. The client does
 not automatically retry writes. Discard a read buffer after an error. After a low-level
 communication error the client disconnects itself; reconnect before the next operation.
+A valid terminal S7 `ACK` carrying a PLC error returns `S7Unspecified` and keeps
+the session usable. An empty or malformed `ACK` disconnects the client.
 
 `pdu_length` is diagnostic; changing it does not override the internal negotiated
 limits. `chunks` counts attempted read/write chunks, including a failing chunk.
