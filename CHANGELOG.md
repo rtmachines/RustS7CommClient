@@ -28,7 +28,7 @@
 - Signatures: replace `Result<T, S7Error>` with `rust7::Result<T>`; `use rust7::S7Error` no longer compiles.
 - Matching: `matches!(e, S7Error::X)` becomes `e.get_type() == Some(rust7::kind::X)`. Variant names map to upper-snake constants (`S7Error::NotConnected` to `kind::NOT_CONNECTED`, `Io(_)` to `kind::IO`). `S7Error::Other` was never produced and has no replacement. Treat an unknown or missing category as an unrecoverable error.
 - Reconnecting: use `client.connected` as the signal to reconnect. After a session-breaking category the client sets it to `false`; PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) and parameter errors keep the session.
-- Causes: walk the chain with `std::error::Error::source()`; `{e:#}` prints it.
+- Causes: walk the chain with `std::error::Error::source()`; `{e}` prints it inline and `{e:#}` on separate lines.
 - Lost information: `io::ErrorKind`, `raw_os_error` and downcasting to `io::Error` are not available after conversion; use `kind::IO` and the message text instead.
 - Serialization: `AnyError` serializes with serde in the format owned by `anyerror` (`typ`, `msg`, `source`, `context`, `backtrace`). A round trip preserves category, context and the cause chain. There is no schema stability promise across `anyerror` versions, and full `Display` text is not stable; only categories and the presence of context fields are.
 - Unchanged: multi-chunk writes are not atomic, writes are never retried automatically, and a read buffer must be discarded after an error.

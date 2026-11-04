@@ -2,8 +2,8 @@
 //!
 //! Compare the category with the constants in [`kind`]; the strings are a stable
 //! contract. Every public client method adds one context (method name and
-//! parameters, never buffer contents), so `{e}` prints the category and message
-//! and `{e:#}` also prints the context and the `source:` chain.
+//! parameters, never buffer contents), so `{e}` prints the category, message,
+//! context and causes on one line and `{e:#}` prints them on separate lines.
 //!
 //! ```
 //! fn configure(c: &mut rust7::S7Client) -> rust7::Result<()> {

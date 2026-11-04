@@ -121,7 +121,7 @@ disconnected.
 Each public method adds exactly one context: the method name and its parameters (for example `db=`, `start=`, `len=`,
 `ip=`, `port=`), never buffer contents or PLC data. A `Display` looks like
 `rust7::NotConnected: Not connected while: read_db db=7 start=3 len=4`. The categories and the presence of context
-fields are stable, the full text is not. The alternate format `{e:#}` prints the context and the `source:` chain on
+fields are stable, the full text is not. Plain `{e}` prints category, message, context and causes on one line; the alternate format `{e:#}` prints the context and the `source:` chain on
 separate lines; the chain is also available through `std::error::Error::source()`.
 
 `AnyError` implements serde `Serialize`/`Deserialize` in the format defined by `anyerror`
