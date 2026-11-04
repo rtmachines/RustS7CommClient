@@ -1,9 +1,21 @@
 //! Run explicitly: cargo test --test tcp_smoke -- --ignored
-use rust7::{S7Client, S7Error, S7_AREA_DB};
+use rust7::{kind, S7Client, S7_AREA_DB};
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[track_caller]
+fn assert_kind<T>(result: &rust7::Result<T>, expected: &str) {
+    match result {
+        Ok(_) => panic!("expected error of kind {expected}, got Ok"),
+        Err(e) if e.get_type() == Some(expected) => {}
+        Err(e) => panic!(
+            "expected error of kind {expected}, got {:?}: {e}",
+            e.get_type()
+        ),
+    }
+}
 
 fn frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut header = [0; 4];
@@ -64,6 +76,7 @@ enum Scenario {
     PlcError,
     AckError(bool),
     MalformedAck(bool),
+    MidFrameClose,
 }
 
 fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
@@ -132,6 +145,12 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             assert_eq!(count, 1);
         }
         let first = reference == 1;
+        if scenario == Scenario::MidFrameClose {
+            // Declare a longer frame, send only 3 more bytes and close the socket.
+            stream.write_all(&[3, 0, 0, 30, 2, 0xf0, 0x80])?;
+            stream.shutdown(Shutdown::Both)?;
+            return Ok(());
+        }
         if first && matches!(scenario, Scenario::AckError(_) | Scenario::MalformedAck(_)) {
             let writing = matches!(
                 scenario,
@@ -238,16 +257,13 @@ fn run(scenario: Scenario) {
             Scenario::BadPdu | Scenario::OversizedPdu(_) | Scenario::BadCotp
         ) {
             if scenario == Scenario::BadCotp {
-                assert!(matches!(result, Err(S7Error::IsoConnectionFailed)));
+                assert_kind(&result, kind::ISO_CONNECTION_FAILED);
             } else {
-                assert!(matches!(result, Err(S7Error::PduNegotiationFailed)));
+                assert_kind(&result, kind::PDU_NEGOTIATION_FAILED);
             }
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
-            assert!(matches!(
-                client.read_db(100, 0, &mut [0]),
-                Err(S7Error::NotConnected)
-            ));
+            assert_kind(&client.read_db(100, 0, &mut [0]), kind::NOT_CONNECTED);
         } else if let Scenario::AckError(writing) | Scenario::MalformedAck(writing) = scenario {
             result.unwrap();
             let mut buffer = [0xaa; 600];
@@ -260,15 +276,12 @@ fn run(scenario: Scenario) {
             assert_eq!(client.chunks, 1);
             assert_eq!(client.last_time, 0.0);
             if matches!(scenario, Scenario::MalformedAck(_)) {
-                assert!(matches!(result, Err(S7Error::IsoInvalidTelegram)));
+                assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
                 assert!(!client.connected);
                 assert_eq!(client.pdu_length, 0);
-                assert!(matches!(
-                    client.write_db(100, 0, &[1]),
-                    Err(S7Error::NotConnected)
-                ));
+                assert_kind(&client.write_db(100, 0, &[1]), kind::NOT_CONNECTED);
             } else {
-                assert!(matches!(result, Err(S7Error::S7Unspecified)));
+                assert_kind(&result, kind::S7_UNSPECIFIED);
                 assert!(client.connected);
                 assert_eq!(client.pdu_length, 240);
                 let mut next = [0; 4];
@@ -279,23 +292,30 @@ fn run(scenario: Scenario) {
         } else if scenario == Scenario::LateReply {
             result.unwrap();
             let mut buffer = [0; 4];
-            assert!(matches!(
-                client.read_db(100, 0, &mut buffer),
-                Err(S7Error::Io(_))
-            ));
+            let result = client.read_db(100, 0, &mut buffer);
+            assert_kind(&result, kind::IO);
+            let message = result.unwrap_err().to_string();
+            let detail = message.strip_prefix(&format!("{}: ", kind::IO));
+            assert!(detail.is_some_and(|d| !d.is_empty()), "{message}");
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
-            assert!(matches!(
-                client.read_db(100, 0, &mut buffer),
-                Err(S7Error::NotConnected)
-            ));
+            assert_kind(&client.read_db(100, 0, &mut buffer), kind::NOT_CONNECTED);
+        } else if scenario == Scenario::MidFrameClose {
+            result.unwrap();
+            assert_kind(
+                &client.read_db(100, 0, &mut [0; 4]),
+                kind::CONNECTION_CLOSED,
+            );
+            assert!(!client.connected);
+            assert_eq!(client.pdu_length, 0);
+            assert_kind(&client.read_db(100, 0, &mut [0; 4]), kind::NOT_CONNECTED);
         } else if scenario == Scenario::PlcError {
             result.unwrap();
             let mut buffer = [0; 4];
-            assert!(matches!(
-                client.read_db(100, 0, &mut buffer),
-                Err(S7Error::S7InvalidAddress)
-            ));
+            assert_kind(
+                &client.read_db(100, 0, &mut buffer),
+                kind::S7_INVALID_ADDRESS,
+            );
             assert!(client.connected);
             client.read_db(100, 0, &mut buffer).unwrap();
             assert_eq!(buffer, [0, 1, 2, 3]);
@@ -309,10 +329,10 @@ fn run(scenario: Scenario) {
                     _ => 240,
                 }
             );
-            assert!(matches!(
-                client.connect_rack_slot("127.0.0.1", 8, 0),
-                Err(S7Error::InvalidFunParameter)
-            ));
+            assert_kind(
+                &client.connect_rack_slot("127.0.0.1", 8, 0),
+                kind::INVALID_FUN_PARAMETER,
+            );
             assert!(client.connected); // The existing connection is kept.
             client.pdu_length = 65535; // Diagnostics cannot override negotiated limits.
             let mut read = vec![0xaa; 65536];
@@ -392,4 +412,10 @@ fn malformed_ack_disconnects_client() {
     for writing in [false, true] {
         run(Scenario::MalformedAck(writing));
     }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn mid_frame_close_disconnects_client() {
+    run(Scenario::MidFrameClose);
 }

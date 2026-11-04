@@ -39,7 +39,7 @@ The connection process is quite complex, and the PLC is not a web server, so the
 
 **Second consideration:**
 
-There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
+There is no such thing as problem-free communication, and this case is no exception. The library reports two groups of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
 In the first case (transport and framing errors, listed for each read/write method), the client disconnects itself (`connected` becomes `false`), and you reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
 
 **Third consideration:**
@@ -75,6 +75,61 @@ while !exit_request{
     thread::sleep(100);
 }
 ```
+
+## Errors
+---
+
+Every fallible method returns `rust7::Result<T>`, an alias for `Result<T, rust7::AnyError>`.
+`AnyError` is the type of the [`anyerror`](https://crates.io/crates/anyerror) crate, re-exported by `rust7`
+(also as `rust7::error::AnyError`). The category of an error is a string constant from `rust7::kind`,
+read with `get_type()`:
+
+```rust,no_run
+use rust7::{kind, S7Client};
+
+let mut client = S7Client::new();
+let mut buf = [0u8; 4];
+if let Err(e) = client.read_db(7, 3, &mut buf) {
+    if e.get_type() == Some(kind::NOT_CONNECTED) {
+        // reconnect
+    }
+    eprintln!("read failed: {e:#}"); // category, message, context and causes
+}
+```
+
+|Constant|Value|Breaks the session|
+|---|---|---|
+|`kind::IO`|`rust7::Io`|yes|
+|`kind::NOT_CONNECTED`|`rust7::NotConnected`|no|
+|`kind::TCP_CONNECTION_FAILED`|`rust7::TcpConnectionFailed`|no|
+|`kind::CONNECTION_CLOSED`|`rust7::ConnectionClosed`|yes|
+|`kind::ISO_CONNECTION_FAILED`|`rust7::IsoConnectionFailed`|no|
+|`kind::ISO_FRAGMENTED_PACKET`|`rust7::IsoFragmentedPacket`|yes|
+|`kind::ISO_INVALID_HEADER`|`rust7::IsoInvalidHeader`|yes|
+|`kind::ISO_INVALID_TELEGRAM`|`rust7::IsoInvalidTelegram`|yes|
+|`kind::PDU_NEGOTIATION_FAILED`|`rust7::PduNegotiationFailed`|no|
+|`kind::INVALID_FUN_PARAMETER`|`rust7::InvalidFunParameter`|no|
+|`kind::S7_NOT_FOUND`|`rust7::S7NotFound`|no|
+|`kind::S7_INVALID_ADDRESS`|`rust7::S7InvalidAddress`|no|
+|`kind::S7_UNSPECIFIED`|`rust7::S7Unspecified`|no|
+
+The constant values are a stable contract; `kind::ALL` lists all 13. "Breaks the session" means the client
+disconnects itself (`connected` becomes `false`) and you must reconnect before the next operation. An error with a
+missing or unknown category should be treated as session-breaking. A failed connection attempt leaves the client
+disconnected.
+
+Each public method adds exactly one context: the method name and its parameters (for example `db=`, `start=`, `len=`,
+`ip=`, `port=`), never buffer contents or PLC data. A `Display` looks like
+`rust7::NotConnected: Not connected while: read_db db=7 start=3 len=4`. The categories and the presence of context
+fields are stable, the full text is not. Plain `{e}` prints category, message, context and causes on one line; the alternate format `{e:#}` prints the context and the `source:` chain on
+separate lines; the chain is also available through `std::error::Error::source()`.
+
+`AnyError` implements serde `Serialize`/`Deserialize` in the format defined by `anyerror`
+(`typ`, `msg`, `source`, `context`, `backtrace`). A JSON round trip preserves the category, the context and the cause
+chain; the schema is not guaranteed across `anyerror` versions. After conversion to `AnyError`, `io::ErrorKind`,
+`raw_os_error` and downcasting to `io::Error` are not available.
+
+Errors never imply a retry: multi-chunk writes are not atomic and writes are not retried automatically.
 
 # API
 ---
@@ -115,7 +170,7 @@ while !exit_request{
 ---
 
 ```rust
-pub fn set_connection_type(&mut self, connection_type: u16)
+pub fn set_connection_type(&mut self, connection_type: u16) -> rust7::Result<()>
 ```
 ### Changes the S7 connection type to the PLC
 
@@ -137,10 +192,10 @@ In this case, use `CT_OP` or `CT_S7`.
 - `connection_type`: Connection type.
  
 #### Returns
-`Ok(())` on success, or an `S7Error` on failure.
+`Ok(())` on success, or an `AnyError` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 
 #### Notes
 1. The client must not be connected (that is, call this method before connecting).
@@ -149,7 +204,7 @@ In this case, use `CT_OP` or `CT_S7`.
 ---
 
 ```rust
-pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout_ms: u64 )
+pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout_ms: u64) -> rust7::Result<()>
 ```
 ### Sets operations timeout
 
@@ -159,18 +214,18 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
 
 #### Returns
-`Ok(())` on success, or an `S7Error` on failure.
+`Ok(())` on success, or an `AnyError` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 
 #### Notes
-1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
+1. Values must be > 0, otherwise `rust7::kind::INVALID_FUN_PARAMETER` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
 ```rust
-pub fn set_connection_port(&mut self, port: u16)
+pub fn set_connection_port(&mut self, port: u16) -> rust7::Result<()>
 ```
 ### Sets the TCP Connection Port
 The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
@@ -179,13 +234,13 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 - `connection_type`: Connection type.
  
 #### Returns
-`Ok(())` on success, or an `S7Error` on failure.
+`Ok(())` on success, or an `AnyError` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 
 ### Notes
-1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
+1. Value must be > 0, otherwise `rust7::kind::INVALID_FUN_PARAMETER` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
@@ -193,7 +248,7 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 ---
 
 ```rust
-pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<(), S7Error>
+pub fn connect_s71200_1500(&mut self, ip: &str) -> rust7::Result<()>
 ```
 ### Connects to the S71200 or S71500 families   
 
@@ -205,7 +260,7 @@ For Notes, Return and Errors look at `connect_tsap()`
 
 ---
 ```rust
-pub fn connect_s7300(&mut self, ip: &str) -> Result<(), S7Error>
+pub fn connect_s7300(&mut self, ip: &str) -> rust7::Result<()>
 ```
 ### Connects to S7300 family
 
@@ -217,7 +272,7 @@ For Notes, Return and Errors look at `connect_tsap()`
 
 ---
 ```rust
-pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<()
+pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> rust7::Result<()>
 ```
 ### Connects to a Siemens PLC/Drive using Rack and Slot
 Rack and Slot are Hardware configuration parameters.
@@ -232,13 +287,13 @@ Ultimately, you will need of this method only to connect to S7400, WinAC or othe
 - `slot` : CPU/CU Slot (0..=31).
 
 #### Errors
-- `S7Error::InvalidFunParameter`: rack or slot out of range. Returned before connecting; an existing connection is kept.
+- `rust7::kind::INVALID_FUN_PARAMETER`: rack or slot out of range. Returned before connecting; an existing connection is kept.
 
 For Notes, Return and other Errors look at `connect_tsap()`
 
 ---
 ```rust
-pub fn connect_tsap(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<(), S7Error>
+pub fn connect_tsap(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> rust7::Result<()>
 ```
 ### Connects to a Siemens ISO-Hardware using TSAP records
 
@@ -255,15 +310,15 @@ The connection port used is 102 (S7Protocol Port) unless you
 changed it via `set_connection_port()`
 
 #### Returns
-`Ok(())` on success, or an `S7Error` on failure.
+`Ok(())` on success, or an `AnyError` on failure.
 
 #### Errors
-- `S7Error::TcpConnectionFailed`: the address resolves to no socket address.
-- `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
-- `S7Error::ConnectionClosed`: the peer closed the connection.
-- `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
-- `S7Error::IsoConnectionFailed`: ISO connection failed
-- `S7Error::PduNegotiationFailed`: PDU negotiation failed.
+- `rust7::kind::TCP_CONNECTION_FAILED`: the address resolves to no socket address.
+- `rust7::kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+- `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection.
+- `rust7::kind::ISO_INVALID_HEADER` / `rust7::kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
+- `rust7::kind::ISO_CONNECTION_FAILED`: ISO connection failed
+- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -273,7 +328,7 @@ Example of using TSAPs (from Snap7 manual)
 ---
 
 ```rust
-pub fn read_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, buffer: &mut [u8]) -> Result<(), S7Error>
+pub fn read_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, buffer: &mut [u8]) -> rust7::Result<()>
 ```
 ### Reads a block of data from a specific S7 memory area.
 
@@ -303,20 +358,20 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 
 #### Errors
 ##### Low level
-- `S7Error::NotConnected`: An attempt was made to read while the client was not connected.
-- `S7Error::IsoInvalidHeader`: Invalid ISO Header
-- `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
-- `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
-- `S7Error::ConnectionClosed`: the PLC closed the connection.
+- `rust7::kind::NOT_CONNECTED`: An attempt was made to read while the client was not connected.
+- `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
+- `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
+- `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
+- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
+- `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
 
 ##### Connection after errors
-After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
+After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or `kind::ISO_FRAGMENTED_PACKET` the client disconnects itself (`connected` becomes `false`); reconnect before the next operation. PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) keep the connection.
   
 ##### High level
-- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
-- `S7Error::S7Unspecified`: Other error reported by the PLC.
-- `S7Error::S7InvalidAddress`:
+- `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
 
@@ -327,7 +382,7 @@ After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `Iso
  
 ---
 ```rust
-pub fn write_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, data: &[u8]) -> Result<(), S7Error>
+pub fn write_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, data: &[u8]) -> rust7::Result<()>
 ```
  
 ### Writes a block of data to a specific S7 memory area.
@@ -359,20 +414,20 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 
 #### Errors
 ##### Low level
-- `S7Error::NotConnected`: An attempt was made to write while the client was not connected.
-- `S7Error::IsoInvalidHeader`: Invalid ISO Header
-- `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
-- `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
-- `S7Error::ConnectionClosed`: the PLC closed the connection.
+- `rust7::kind::NOT_CONNECTED`: An attempt was made to write while the client was not connected.
+- `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
+- `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
+- `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
+- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
+- `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
 
 ##### Connection after errors
-After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
+After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or `kind::ISO_FRAGMENTED_PACKET` the client disconnects itself (`connected` becomes `false`); reconnect before the next operation. PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) keep the connection.
 
 ##### High level
-- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
-- `S7Error::S7Unspecified`: Other error reported by the PLC.
-- `S7Error::S7InvalidAddress`:
+- `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
 
@@ -386,7 +441,7 @@ After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `Iso
 ---
 
 ```rust
-pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> Result<(), S7Error>
+pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> rust7::Result<()>
 ```
 #### Reads a block of byte from a specific Data Block (DB)
 
@@ -406,7 +461,7 @@ For further info, please refer to `read_area()`
 
 ---
 ```rust
-pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> Result<(), S7Error>
+pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> rust7::Result<()>
 ```
 #### Writes a block of byte to a specific Data Block (DB)
 
@@ -426,7 +481,7 @@ For further info, please refer to `write_area()`
 
 ---
 ```rust
-pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8) -> Result<bool, S7Error>
+pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8) -> rust7::Result<bool>
 ```
  #### Reads a bit from a specific S7 memory area
 
@@ -446,10 +501,10 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
  ```my_bit = read_bit(S7_AREA_DB, 10, 71, 4);```
  
  #### Returns
- `Ok(<bool>)` or `Err(<S7Error>)`
+ `Ok(<bool>)` or `Err(<AnyError>)`
 
 #### Errors
-- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 - Other reported by read_area()
 
  #### Suggestion
@@ -462,7 +517,7 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
 
 ---
 ```rust
-pub fn write_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8, value: bool) -> Result<(), S7Error>
+pub fn write_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8, value: bool) -> rust7::Result<()>
 ```
 #### Writes a bit to a specific S7 memory area
 
@@ -486,7 +541,7 @@ To write **1** into DB10.DBX71.4 use:
 `Ok(())` Operation succeeded.
 
 #### Errors
-- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 - Other reported by write_area()
 
 #### Notes
@@ -539,7 +594,7 @@ is copied or a write is acknowledged. COTP fragmentation is not supported.
 The client offers a 1024-byte COTP TPDU. A Connection Confirm may select a smaller
 TPDU through parameter `0xC0`, which must occur at most once, have length 1, and
 contain an exponent from 7 through 10. Invalid or oversized selections fail with
-`IsoConnectionFailed`. If the option is absent, the client retains a local 1024-byte
+`kind::ISO_CONNECTION_FAILED`. If the option is absent, the client retains a local 1024-byte
 send cap for compatibility; absence is not treated as an explicit 128-byte choice.
 
 The S7 Setup Communication offer fits in one COTP TPDU, including its 3-byte header:
@@ -552,7 +607,7 @@ The S7 Setup Communication offer fits in one COTP TPDU, including its 3-byte hea
 | 1024 (also the local cap when `0xC0` is absent) | 480 |
 
 The CPU must select an S7 PDU size from 29 through the offered size; an out-of-range
-reply fails with `PduNegotiationFailed`. No connection is exposed until both
+reply fails with `kind::PDU_NEGOTIATION_FAILED`. No connection is exposed until both
 handshakes succeed. Read payloads are limited to `pdu_length - 18` bytes and write
 payloads to `pdu_length - 28`, keeping requests and expected responses within one
 TPDU. The public `pdu_length` field reports the negotiated S7 size, excluding COTP;
@@ -560,9 +615,9 @@ it is diagnostic and cannot override internal limits.
 
 A terminal S7 `ACK` (`ROSCTR=0x02`) is accepted only as a PLC error: it must have a
 12-byte header, a matching request reference, zero parameter/data lengths, and a
-nonzero error class/code pair. It returns `S7Unspecified` and keeps the session
-usable. An `ACK` without an error or with extra parameters/data is an
-`IsoInvalidTelegram` and disconnects the client. It never confirms a successful
+nonzero error class/code pair. It returns `kind::S7_UNSPECIFIED` and keeps the session
+usable. An `ACK` without an error or with extra parameters/data is a
+`kind::ISO_INVALID_TELEGRAM` error and disconnects the client. It never confirms a successful
 write. Successful reads and writes still require a validated `ACK_DATA` response.
 
 A multichunk write is not atomic: earlier chunks may have reached the PLC when a

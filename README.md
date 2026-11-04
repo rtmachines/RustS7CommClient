@@ -5,7 +5,9 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 ---
 
 ## Features
-- Pure Rust, no unsafe code.
+- Pure Rust; `#![forbid(unsafe_code)]` applies to the crate's own code.
+- Few dependencies: `anyerror` (which pulls in `serde`). To pass `rust7::AnyError` through your application without conversion, your `anyerror` must be semver-compatible with 0.1.x so Cargo unifies the versions.
+- Errors are `rust7::AnyError` with a stable category from `rust7::kind` and per-call context.
 - Low latency: ≈ 1ms/PDU.
 - Small footprint.
 - Strict control of incoming headers.
@@ -15,7 +17,7 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 
 ## Quick start
 ```rust,no_run
-use rust7::client::{S7Client};
+use rust7::S7Client;
 
 fn main() {
     let mut client = S7Client::new();
@@ -25,7 +27,7 @@ fn main() {
     match client.connect_s71200_1500("192.168.0.100") {
         Ok(_) => { println!("Connected to PLC") },
         Err(e) => {
-            eprintln!("Connection failed: {}", e);
+            eprintln!("Connection failed: {e:#}");
             return;
         }
     }
@@ -38,7 +40,7 @@ fn main() {
             println!("Success!");
             println!("Job time (ms) : {:.3}", client.last_time);
         },
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
     client.disconnect();
@@ -63,11 +65,53 @@ for an incomplete or inconsistent response. Writes across multiple chunks are no
 atomic: an error can occur after earlier chunks have reached the PLC. The client does
 not automatically retry writes. Discard a read buffer after an error. After a low-level
 communication error the client disconnects itself; reconnect before the next operation.
-A valid terminal S7 `ACK` carrying a PLC error returns `S7Unspecified` and keeps
+A valid terminal S7 `ACK` carrying a PLC error returns `kind::S7_UNSPECIFIED` and keeps
 the session usable. An empty or malformed `ACK` disconnects the client.
 
 `pdu_length` is diagnostic; changing it does not override the internal negotiated
 limits. `chunks` counts attempted read/write chunks, including a failing chunk.
+
+## Errors
+
+Fallible methods return `rust7::Result<T>`, with `rust7::AnyError` (from the `anyerror` crate) as the
+error. Match on the category, not on the text:
+
+```rust,no_run
+use rust7::{kind, S7Client};
+
+let mut client = S7Client::new();
+let mut buf = [0u8; 4];
+if let Err(e) = client.read_db(7, 3, &mut buf) {
+    match e.get_type() {
+        Some(kind::NOT_CONNECTED) => { /* reconnect */ }
+        _ => eprintln!("read failed: {e:#}"), // category, context and causes
+    }
+}
+```
+
+| Constant | Value | Breaks the session |
+| --- | --- | --- |
+| `kind::IO` | `rust7::Io` | yes |
+| `kind::NOT_CONNECTED` | `rust7::NotConnected` | no |
+| `kind::TCP_CONNECTION_FAILED` | `rust7::TcpConnectionFailed` | no |
+| `kind::CONNECTION_CLOSED` | `rust7::ConnectionClosed` | yes |
+| `kind::ISO_CONNECTION_FAILED` | `rust7::IsoConnectionFailed` | no |
+| `kind::ISO_FRAGMENTED_PACKET` | `rust7::IsoFragmentedPacket` | yes |
+| `kind::ISO_INVALID_HEADER` | `rust7::IsoInvalidHeader` | yes |
+| `kind::ISO_INVALID_TELEGRAM` | `rust7::IsoInvalidTelegram` | yes |
+| `kind::PDU_NEGOTIATION_FAILED` | `rust7::PduNegotiationFailed` | no |
+| `kind::INVALID_FUN_PARAMETER` | `rust7::InvalidFunParameter` | no |
+| `kind::S7_NOT_FOUND` | `rust7::S7NotFound` | no |
+| `kind::S7_INVALID_ADDRESS` | `rust7::S7InvalidAddress` | no |
+| `kind::S7_UNSPECIFIED` | `rust7::S7Unspecified` | no |
+
+"Breaks the session" means the client disconnects itself (`client.connected` becomes `false`);
+use that flag as the signal to reconnect. Any failed connection attempt leaves the client
+disconnected (`connected == false`), because `connect_*` drops a previous session first. Every public method adds one context with the method
+name and its parameters (never buffer contents); categories and the presence of context fields are
+stable, the full `Display` text is not. Errors serialize with serde in the format owned by
+`anyerror`, which preserves category, context and causes but is not schema-stable across `anyerror`
+versions. `io::ErrorKind`, `raw_os_error` and downcasting are not available after conversion.
 
 ## Documentation
 The detailed documentation is <a href="doc/Documentation.md" target="_blank">here</a>.
