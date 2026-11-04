@@ -5,7 +5,7 @@
 ## [0.2.0] - Unreleased
 
 ### Changed
-- **Breaking:** all fallible public methods return `rust7::Result<T>` (an alias for `Result<T, AnyError>`), where `AnyError` is `anyerror::AnyError`, re-exported as `rust7::AnyError`. `rust7::S7Error` and `rust7::client::S7Error` are removed. The 13 affected methods are `set_connection_type`, `set_timeout`, `set_connection_port`, `connect_s71200_1500`, `connect_s7300`, `connect_rack_slot`, `connect_tsap`, `read_area`, `write_area`, `read_db`, `write_db`, `read_bit` and `write_bit`
+- **Breaking:** all fallible public methods return `rust7::Result<T>` (an alias `Result<T, E = AnyError>`, so a two-parameter `Result<T, E>` still works after `use rust7::*;`), where `AnyError` is `anyerror::AnyError`, re-exported as `rust7::AnyError`. `rust7::S7Error` and `rust7::client::S7Error` are removed. The 13 affected methods are `set_connection_type`, `set_timeout`, `set_connection_port`, `connect_s71200_1500`, `connect_s7300`, `connect_rack_slot`, `connect_tsap`, `read_area`, `write_area`, `read_db`, `write_db`, `read_bit` and `write_bit`
 - Errors carry a stable category string from `rust7::kind` (13 constants, `kind::ALL`), read with `e.get_type()`
 - Every public method adds one context with the method name and its parameters (never buffer contents), e.g. `rust7::NotConnected: Not connected while: read_db db=7 start=3 len=4`; `{e:#}` prints context and `source:` causes on separate lines
 - New dependency: `anyerror` 0.1.13 (pulls in `serde`); `serde_json` is a dev-dependency only. `#![forbid(unsafe_code)]` still applies to the code of `rust7` itself
@@ -25,8 +25,9 @@
 - Error documentation matches actual categories
 
 ### Migration 0.1 to 0.2
+- Passing `rust7::AnyError` through an application without conversion requires the application's `anyerror` to be semver-compatible with 0.1.x (it is the same type only when Cargo unifies the versions).
 - Signatures: replace `Result<T, S7Error>` with `rust7::Result<T>`; `use rust7::S7Error` no longer compiles.
-- Matching: `matches!(e, S7Error::X)` becomes `e.get_type() == Some(rust7::kind::X)`. Variant names map to upper-snake constants (`S7Error::NotConnected` to `kind::NOT_CONNECTED`, `Io(_)` to `kind::IO`). `S7Error::Other` was never produced and has no replacement. Treat an unknown or missing category as an unrecoverable error.
+- Matching: `matches!(e, S7Error::X)` becomes `e.get_type() == Some(rust7::kind::X)`. Variant names map to upper-snake constants (`S7Error::NotConnected` to `kind::NOT_CONNECTED`, `Io(_)` to `kind::IO`). `S7Error::Other` was never produced and has no replacement. Treat an unknown or missing category as session-breaking (reconnect).
 - Reconnecting: use `client.connected` as the signal to reconnect. After a session-breaking category the client sets it to `false`; PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) and parameter errors keep the session.
 - Causes: walk the chain with `std::error::Error::source()`; `{e}` prints it inline and `{e:#}` on separate lines.
 - Lost information: `io::ErrorKind`, `raw_os_error` and downcasting to `io::Error` are not available after conversion; use `kind::IO` and the message text instead.

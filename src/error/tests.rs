@@ -148,3 +148,25 @@ fn io_error_round_trip() {
         err.source().unwrap().to_string()
     );
 }
+
+#[test]
+fn kind_values_are_stable() {
+    assert_eq!(
+        kind::ALL,
+        [
+            "rust7::Io",
+            "rust7::NotConnected",
+            "rust7::TcpConnectionFailed",
+            "rust7::ConnectionClosed",
+            "rust7::IsoConnectionFailed",
+            "rust7::IsoFragmentedPacket",
+            "rust7::IsoInvalidHeader",
+            "rust7::IsoInvalidTelegram",
+            "rust7::PduNegotiationFailed",
+            "rust7::InvalidFunParameter",
+            "rust7::S7NotFound",
+            "rust7::S7InvalidAddress",
+            "rust7::S7Unspecified",
+        ]
+    );
+}

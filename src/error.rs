@@ -33,20 +33,21 @@
 
 pub use anyerror::AnyError;
 
-/// Result alias with [`AnyError`] as the error type.
-pub type Result<T> = std::result::Result<T, AnyError>;
+/// Result alias with [`AnyError`] as the default error type; the second parameter keeps
+/// `Result<T, E>` usable after `use rust7::*;`.
+pub type Result<T, E = AnyError> = std::result::Result<T, E>;
 
 /// Stable category strings returned by [`AnyError::get_type`](crate::AnyError::get_type).
 pub mod kind {
     /// Socket or name-resolution I/O failure. Breaks the session.
     pub const IO: &str = "rust7::Io";
-    /// The operation needs a connected client. Keeps the session.
+    /// The operation needs a connected client. No session to break.
     pub const NOT_CONNECTED: &str = "rust7::NotConnected";
-    /// The address resolves to no socket address. Raised while connecting; the client stays disconnected.
+    /// The address resolves to no socket address. Raised while connecting; a failed connect leaves the client disconnected (any previous session was already closed).
     pub const TCP_CONNECTION_FAILED: &str = "rust7::TcpConnectionFailed";
     /// The peer closed the TCP connection. Breaks the session.
     pub const CONNECTION_CLOSED: &str = "rust7::ConnectionClosed";
-    /// ISO-on-TCP connection request was rejected or malformed. Raised while connecting; the client stays disconnected.
+    /// ISO-on-TCP connection request was rejected or malformed. Raised while connecting; a failed connect leaves the client disconnected (any previous session was already closed).
     pub const ISO_CONNECTION_FAILED: &str = "rust7::IsoConnectionFailed";
     /// Fragmented ISO packet (COTP fragmentation is unsupported). Breaks the session.
     pub const ISO_FRAGMENTED_PACKET: &str = "rust7::IsoFragmentedPacket";
@@ -54,7 +55,7 @@ pub mod kind {
     pub const ISO_INVALID_HEADER: &str = "rust7::IsoInvalidHeader";
     /// Inconsistent or malformed telegram. Breaks the session.
     pub const ISO_INVALID_TELEGRAM: &str = "rust7::IsoInvalidTelegram";
-    /// S7 PDU size negotiation failed. Raised while connecting; the client stays disconnected.
+    /// S7 PDU size negotiation failed. Raised while connecting; a failed connect leaves the client disconnected (any previous session was already closed).
     pub const PDU_NEGOTIATION_FAILED: &str = "rust7::PduNegotiationFailed";
     /// A parameter was rejected before any I/O. Keeps the session.
     pub const INVALID_FUN_PARAMETER: &str = "rust7::InvalidFunParameter";

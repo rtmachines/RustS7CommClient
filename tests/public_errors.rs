@@ -105,3 +105,22 @@ fn read_area_context_lists_transfer() {
         ["read_area area=0x84 db=5 start=10 wordlen=2 len=6"]
     );
 }
+
+mod glob_import {
+    use rust7::*;
+
+    #[test]
+    fn glob_import_keeps_two_parameter_result() {
+        fn parse(ok: bool) -> Result<u8, std::fmt::Error> {
+            if ok {
+                Ok(1)
+            } else {
+                Err(std::fmt::Error)
+            }
+        }
+        let default: Result<u8> = Ok(S7_AREA_DB);
+        assert!(default.is_ok());
+        assert_eq!(parse(true), Ok(1));
+        assert!(parse(false).is_err());
+    }
+}
