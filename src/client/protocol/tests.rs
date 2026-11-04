@@ -229,9 +229,46 @@ fn negotiation_rejects_bad_header_or_error() {
 }
 
 #[test]
-fn write_chunk_is_never_zero() {
+fn minimum_pdu_writes_one_byte_per_chunk() {
     let limits = PduLimits::new(29).unwrap();
-    assert_eq!(1usize.min(limits.write_payload), 1);
+    let mut io = Scripted::pieces((1..=3).map(|r| data_frame(&ack(r, 5, &[0xff]))));
+    let (mut reference, mut chunks) = (0, 0);
+    write_transfer(
+        &mut io,
+        &limits,
+        &mut reference,
+        transfer(10, false),
+        &[7, 8, 9],
+        &mut chunks,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let packets = requests(&io);
+    assert_eq!(chunks, 3);
+    assert_eq!(packets.len(), 3);
+    for (i, p) in packets.iter().enumerate() {
+        assert_eq!(&p[23..25], &[0, 1]);
+        assert_eq!(&p[28..31], &((10 + i as u32) * 8).to_be_bytes()[1..]);
+        assert_eq!(p[35], 7 + i as u8);
+    }
+}
+
+#[test]
+fn connection_confirm_rejects_each_invalid_field() {
+    let good = tpkt(&[6, 0xd0, 0, 1, 0x12, 0x34, 0]);
+    validate_connection_confirm(&good).unwrap(); // Any source reference is accepted.
+    for (index, value) in [(4, 7), (5, 0xe0), (5, 0xd1), (7, 2), (10, 0x10)] {
+        let mut bad = good.clone();
+        bad[index] = value;
+        assert!(
+            matches!(
+                validate_connection_confirm(&bad),
+                Err(S7Error::IsoConnectionFailed)
+            ),
+            "index {index}"
+        );
+    }
+    assert!(validate_connection_confirm(&tpkt(&[7, 0xd0, 0, 1, 0, 1, 0, 0xc0])).is_err());
 }
 
 fn ack(reference: u16, function: u8, data: &[u8]) -> Vec<u8> {
