@@ -106,8 +106,10 @@ if let Err(e) = client.read_db(7, 3, &mut buf) {
 | `kind::S7_UNSPECIFIED` | `rust7::S7Unspecified` | no |
 
 "Breaks the session" means the client disconnects itself (`client.connected` becomes `false`);
-use that flag as the signal to reconnect. Any failed connection attempt leaves the client
-disconnected (`connected == false`), because `connect_*` drops a previous session first. Every public method adds one context with the method
+use that flag as the signal to reconnect. A connection attempt that fails after parameter
+validation leaves the client disconnected (`connected == false`), because `connect_*` drops a
+previous session first; only `connect_rack_slot` with an out-of-range rack or slot is rejected
+(`kind::INVALID_FUN_PARAMETER`) before connecting and keeps the existing session. Every public method adds one context with the method
 name and its parameters (never buffer contents); categories and the presence of context fields are
 stable, the full `Display` text is not. Errors serialize with serde in the format owned by
 `anyerror`, which preserves category, context and causes but is not schema-stable across `anyerror`
