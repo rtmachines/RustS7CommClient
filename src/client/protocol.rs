@@ -315,17 +315,18 @@ pub(super) fn write_transfer<T: Read + Write>(
 ) -> Result<(), S7Error> {
     valid_area(transfer.area)?;
     let len = validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
+    // validate_transfer guarantees a nonempty buffer for bit access.
+    let bit = [u8::from(transfer.wordlen == 1 && buffer[0] != 0)];
     let mut offset = 0;
     while offset < len {
         let count = (len - offset).min(limits.write_payload);
         let reference = next_reference(reference);
-        let req = request(
-            &transfer,
-            offset,
-            count,
-            reference,
-            Some(&buffer[offset..offset + count]),
-        );
+        let payload = if transfer.wordlen == 1 {
+            &bit[..]
+        } else {
+            &buffer[offset..offset + count]
+        };
+        let req = request(&transfer, offset, count, reference, Some(payload));
         *chunks += 1;
         io.write_all(&req)?;
         let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7)?;

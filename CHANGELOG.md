@@ -7,6 +7,7 @@
 ### Fixed
 - `cargo test` no longer runs the README example against 192.168.0.100
 - `connect_rack_slot` rejects rack > 7 or slot > 31 instead of panicking or silently connecting to another TSAP
+- Raw bit writes send 0/1, matching the documented 'true if != 0' rule
 
 ## [0.1.2] - 2025-08-15
 

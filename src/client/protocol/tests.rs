@@ -593,3 +593,33 @@ fn remote_tsap_encodes_and_rejects_out_of_range() {
         ));
     }
 }
+
+#[test]
+fn bit_write_payload_is_normalized() {
+    let limits = PduLimits::new(480).unwrap();
+    for (input, expected) in [
+        (vec![0], 0),
+        (vec![1], 1),
+        (vec![2], 1),
+        (vec![0x80], 1),
+        (vec![0xff], 1),
+        (vec![0, 1], 0),
+    ] {
+        let mut io = Scripted::pieces([data_frame(&ack(1, 5, &[0xff]))]);
+        let (mut reference, mut chunks) = (0, 0);
+        write_transfer(
+            &mut io,
+            &limits,
+            &mut reference,
+            transfer(3, true),
+            &input,
+            &mut chunks,
+        )
+        .unwrap();
+        assert_eq!(
+            &requests(&io)[0][31..],
+            &[0, 3, 0, 1, expected],
+            "input {input:?}"
+        );
+    }
+}
