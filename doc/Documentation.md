@@ -40,7 +40,7 @@ The connection process is quite complex, and the PLC is not a web server, so the
 **Second consideration:**
 
 There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
-In the first case, the client disconnects itself (`connected` becomes `false`), and you reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
+In the first case (transport and framing errors, listed for each read/write method), the client disconnects itself (`connected` becomes `false`), and you reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
 
 **Third consideration:**
 
@@ -307,7 +307,6 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidHeader`: Invalid ISO Header
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
 - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
 - `S7Error::ConnectionClosed`: the PLC closed the connection.
 
@@ -316,6 +315,7 @@ After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `Iso
   
 ##### High level
 - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7Unspecified`: Other error reported by the PLC.
 - `S7Error::S7InvalidAddress`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -363,7 +363,6 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidHeader`: Invalid ISO Header
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
 - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
 - `S7Error::ConnectionClosed`: the PLC closed the connection.
 
@@ -372,6 +371,7 @@ After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `Iso
 
 ##### High level
 - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7Unspecified`: Other error reported by the PLC.
 - `S7Error::S7InvalidAddress`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.

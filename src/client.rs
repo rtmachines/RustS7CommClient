@@ -429,7 +429,8 @@ impl S7Client {
     /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
     ///
     /// ### Notes
-    /// A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
+    /// The client disconnects itself after transport or framing errors (see `read_area()` and
+    /// `write_area()`); calling this again is harmless.
     ///
     pub fn disconnect(&mut self) {
         if let Some(stream) = self.stream.take() {
@@ -472,7 +473,6 @@ impl S7Client {
     /// - `S7Error::IsoInvalidHeader`: Invalid ISO Header
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-    /// - `S7Error::S7Unspecified`: Unknown S7 Error.
     /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
     /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
@@ -484,6 +484,7 @@ impl S7Client {
     /// #### High level
     /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -577,7 +578,6 @@ impl S7Client {
     /// - `S7Error::IsoInvalidHeader`: Invalid ISO Header
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-    /// - `S7Error::S7Unspecified`: Unknown S7 Error.
     /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
     /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
@@ -589,6 +589,7 @@ impl S7Client {
     /// #### High level
     /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
