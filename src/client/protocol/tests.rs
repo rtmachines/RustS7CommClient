@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::{assert_kind, kind};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
 use std::time::{Duration, Instant};
@@ -122,20 +123,24 @@ fn read_tpkt_rejects_invalid_lengths() {
 
 #[test]
 fn read_tpkt_propagates_eof_and_timeout() {
-    for kind in [
+    for io_kind in [
         io::ErrorKind::UnexpectedEof,
         io::ErrorKind::TimedOut,
         io::ErrorKind::WouldBlock,
     ] {
         let mut io = Scripted::pieces([vec![3, 0, 0, 22], vec![0; 3]]);
-        if kind != io::ErrorKind::UnexpectedEof {
-            io.reads.push_back(Err(kind.into()));
+        if io_kind != io::ErrorKind::UnexpectedEof {
+            io.reads.push_back(Err(io_kind.into()));
         }
         let result = read_tpkt(&mut io, 487, Duration::from_secs(1));
-        if kind == io::ErrorKind::UnexpectedEof {
-            assert!(matches!(result, Err(S7Error::ConnectionClosed)));
+        if io_kind == io::ErrorKind::UnexpectedEof {
+            assert_kind(&result, kind::CONNECTION_CLOSED);
         } else {
-            assert!(matches!(result, Err(S7Error::Io(e)) if e.kind() == kind));
+            assert_kind(&result, kind::IO);
+            let err = result.unwrap_err();
+            assert!(err
+                .to_string()
+                .contains(&io::Error::from(io_kind).to_string()));
         }
     }
 }
@@ -188,10 +193,7 @@ fn negotiation_response(length: u16) -> Vec<u8> {
 #[test]
 fn pdu_limits_reject_invalid_sizes() {
     for n in [0, 1, 18, 27, 28, 481, 65535] {
-        assert!(matches!(
-            PduLimits::new(n),
-            Err(S7Error::PduNegotiationFailed)
-        ));
+        assert_kind(&PduLimits::new(n), kind::PDU_NEGOTIATION_FAILED);
     }
     for (n, read, write) in [(29, 11, 1), (240, 222, 212), (480, 462, 452)] {
         let limits = PduLimits::new(n).unwrap();
@@ -212,7 +214,7 @@ fn negotiation_rejects_bad_header_or_error() {
         assert!(
             matches!(
                 negotiate(&mut io, 1024, Duration::from_secs(1)),
-                Err(S7Error::PduNegotiationFailed)
+                Err(ref e) if e.get_type() == Some(kind::PDU_NEGOTIATION_FAILED)
             ),
             "index {index}"
         );
@@ -255,7 +257,7 @@ fn negotiation_rejects_size_outside_the_offer() {
             assert!(
                 matches!(
                     negotiate(&mut io, tpdu_limit, Duration::from_secs(1)),
-                    Err(S7Error::PduNegotiationFailed)
+                    Err(ref e) if e.get_type() == Some(kind::PDU_NEGOTIATION_FAILED)
                 ),
                 "TPDU {tpdu_limit}, S7 {accepted}"
             );
@@ -299,7 +301,7 @@ fn connection_confirm_rejects_each_invalid_field() {
         assert!(
             matches!(
                 validate_connection_confirm(&bad),
-                Err(S7Error::IsoConnectionFailed)
+                Err(ref e) if e.get_type() == Some(kind::ISO_CONNECTION_FAILED)
             ),
             "index {index}"
         );
@@ -354,7 +356,7 @@ fn connection_confirm_rejects_invalid_tpdu_options() {
         assert!(
             matches!(
                 validate_connection_confirm(&connection_confirm(&options)),
-                Err(S7Error::IsoConnectionFailed)
+                Err(ref e) if e.get_type() == Some(kind::ISO_CONNECTION_FAILED)
             ),
             "options {options:02x?}"
         );
@@ -371,14 +373,11 @@ fn terminal_error_ack_reports_plc_error() {
     for error in [[0x81, 4], [0x81, 0], [0, 4]] {
         let mut pdu = error_ack(0x1234);
         pdu[10..12].copy_from_slice(&error);
-        assert!(matches!(
-            validate_read_response(&pdu, 0x1234, 2, 4),
-            Err(S7Error::S7Unspecified)
-        ));
-        assert!(matches!(
-            validate_write_response(&pdu, 0x1234),
-            Err(S7Error::S7Unspecified)
-        ));
+        assert_kind(
+            &validate_read_response(&pdu, 0x1234, 2, 4),
+            kind::S7_UNSPECIFIED,
+        );
+        assert_kind(&validate_write_response(&pdu, 0x1234), kind::S7_UNSPECIFIED);
     }
 }
 
@@ -426,7 +425,7 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
                     Duration::from_secs(1),
                 )
             };
-            assert!(matches!(result, Err(S7Error::S7Unspecified)));
+            assert_kind(&result, kind::S7_UNSPECIFIED);
             assert_eq!(chunks, completed + 1);
             assert_eq!(usize::from(reference), chunks);
             assert_eq!(requests(&io).len(), chunks);
@@ -495,14 +494,14 @@ fn malformed_terminal_ack_is_not_a_plc_error_or_write_success() {
         assert!(
             matches!(
                 validate_read_response(&pdu, 0x1234, 2, 4),
-                Err(S7Error::IsoInvalidTelegram)
+                Err(ref e) if e.get_type() == Some(kind::ISO_INVALID_TELEGRAM)
             ),
             "read {pdu:02x?}"
         );
         assert!(
             matches!(
                 validate_write_response(&pdu, 0x1234),
-                Err(S7Error::IsoInvalidTelegram)
+                Err(ref e) if e.get_type() == Some(kind::ISO_INVALID_TELEGRAM)
             ),
             "write {pdu:02x?}"
         );
@@ -598,10 +597,10 @@ fn response_preserves_plc_errors() {
             validate_write_response(&write, 1).unwrap_err(),
         ] {
             assert!(matches!(
-                (expected, err),
-                ("address", S7Error::S7InvalidAddress)
-                    | ("missing", S7Error::S7NotFound)
-                    | ("other", S7Error::S7Unspecified)
+                (expected, err.get_type()),
+                ("address", Some(kind::S7_INVALID_ADDRESS))
+                    | ("missing", Some(kind::S7_NOT_FOUND))
+                    | ("other", Some(kind::S7_UNSPECIFIED))
             ));
         }
     }
@@ -677,7 +676,7 @@ fn bit_address_does_not_wrap() {
             assert_eq!(packets[1].len(), 36);
         }
     }
-    assert!(matches!(bit_start(1, 8), Err(S7Error::InvalidFunParameter)));
+    assert_kind(&bit_start(1, 8), kind::INVALID_FUN_PARAMETER);
 }
 
 #[test]
@@ -772,30 +771,30 @@ fn empty_bit_buffer_rejected_before_io() {
     let mut io = Scripted::default();
     let limits = PduLimits::new(480).unwrap();
     let (mut reference, mut chunks) = (0, 0);
-    assert!(matches!(
-        read_transfer(
+    assert_kind(
+        &read_transfer(
             &mut io,
             &limits,
             &mut reference,
             transfer(0, true),
             &mut [],
             &mut chunks,
-            Duration::from_secs(1)
+            Duration::from_secs(1),
         ),
-        Err(S7Error::InvalidFunParameter)
-    ));
-    assert!(matches!(
-        write_transfer(
+        kind::INVALID_FUN_PARAMETER,
+    );
+    assert_kind(
+        &write_transfer(
             &mut io,
             &limits,
             &mut reference,
             transfer(0, true),
             &[],
             &mut chunks,
-            Duration::from_secs(1)
+            Duration::from_secs(1),
         ),
-        Err(S7Error::InvalidFunParameter)
-    ));
+        kind::INVALID_FUN_PARAMETER,
+    );
     assert!(io.writes.is_empty());
     assert_eq!((reference, chunks), (0, 0));
 }
@@ -839,18 +838,18 @@ fn address_range_checked_before_io() {
     let limits = PduLimits::new(480).unwrap();
     let (mut reference, mut chunks) = (0, 0);
     let buffer = vec![0; 0x200000 - 65535 + 1];
-    assert!(matches!(
-        write_transfer(
+    assert_kind(
+        &write_transfer(
             &mut io,
             &limits,
             &mut reference,
             transfer(65535, false),
             &buffer,
             &mut chunks,
-            Duration::from_secs(1)
+            Duration::from_secs(1),
         ),
-        Err(S7Error::InvalidFunParameter)
-    ));
+        kind::INVALID_FUN_PARAMETER,
+    );
     assert!(io.writes.is_empty());
     let mut buffer = buffer;
     assert!(read_transfer(
@@ -874,18 +873,18 @@ fn second_write_chunk_failure_stops_without_retry() {
         data_frame(&ack(2, 5, &[5])),
     ]);
     let (mut reference, mut chunks) = (0, 0);
-    assert!(matches!(
-        write_transfer(
+    assert_kind(
+        &write_transfer(
             &mut io,
             &limits,
             &mut reference,
             transfer(0, false),
             &vec![42; 600],
             &mut chunks,
-            Duration::from_secs(1)
+            Duration::from_secs(1),
         ),
-        Err(S7Error::S7InvalidAddress)
-    ));
+        kind::S7_INVALID_ADDRESS,
+    );
     let packets = requests(&io);
     assert_eq!(packets.len(), 2);
     assert_eq!(chunks, 2);
@@ -923,10 +922,7 @@ fn remote_tsap_encodes_and_rejects_out_of_range() {
         assert_eq!(remote_tsap(ct, rack, slot).unwrap(), tsap);
     }
     for (rack, slot) in [(8, 0), (0, 32), (2048, 0), (0, 65535), (65535, 65535)] {
-        assert!(matches!(
-            remote_tsap(1, rack, slot),
-            Err(S7Error::InvalidFunParameter)
-        ));
+        assert_kind(&remote_tsap(1, rack, slot), kind::INVALID_FUN_PARAMETER);
     }
 }
 
@@ -968,7 +964,10 @@ fn frame_deadline_bounds_slow_peer() {
     io.delay = Duration::from_millis(20);
     let started = Instant::now();
     let err = read_tpkt(&mut io, 487, Duration::from_millis(100)).unwrap_err();
-    assert!(matches!(err, S7Error::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
+    assert_eq!(err.get_type(), Some(kind::IO));
+    assert!(err
+        .to_string()
+        .contains(&io::Error::from(io::ErrorKind::TimedOut).to_string()));
     assert!(started.elapsed() < Duration::from_millis(400));
     assert!(!io.reads.is_empty());
     assert!(io.timeouts.iter().all(|t| *t <= Duration::from_millis(100)));

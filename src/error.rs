@@ -1,8 +1,5 @@
 //! Error type of the crate: `AnyError` tagged with a stable category from [`kind`].
 
-// removed in Task 2
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub use anyerror::AnyError;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
@@ -110,6 +107,19 @@ pub(crate) fn breaks_session(e: &AnyError) -> bool {
                 | kind::ISO_FRAGMENTED_PACKET
         ),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_kind<T>(result: &Result<T>, expected: &str) {
+    match result {
+        Ok(_) => panic!("expected error of kind {expected}, got Ok"),
+        Err(e) if e.get_type() == Some(expected) => {}
+        Err(e) => panic!(
+            "expected error of kind {expected}, got {:?}: {e}",
+            e.get_type()
+        ),
     }
 }
 
