@@ -75,7 +75,7 @@ commit brancha.
 
 **Interfaces:**
 - Produces (w `src/error.rs`, publiczny moduł `error`):
-  - `pub use anyerror::AnyError;`, `pub type Result<T> = std::result::Result<T, AnyError>;`
+  - `pub use anyerror::AnyError;`, `pub type Result<T, E = AnyError> = std::result::Result<T, E>;` (domyślne `E` dodane po przeglądzie końcowym)
   - `pub mod kind` — 13 stałych `&str` + `pub const ALL: &[&str]` (nazwy jak w specu).
   - `pub(crate) fn io(e: std::io::Error) -> AnyError`
   - `pub(crate) fn <nazwa>() -> AnyError` dla: `not_connected`, `tcp_connection_failed`,

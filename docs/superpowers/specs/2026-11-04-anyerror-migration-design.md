@@ -45,7 +45,7 @@ Nowy plik `src/error.rs`, publiczny moduł `error`:
 
 ```rust
 pub use anyerror::AnyError;
-pub type Result<T> = std::result::Result<T, AnyError>;
+pub type Result<T, E = AnyError> = std::result::Result<T, E>;
 
 pub mod kind {
     pub const IO: &str = "rust7::Io";
@@ -66,6 +66,8 @@ pub mod kind {
 ```
 
 `src/lib.rs` reeksportuje `error::{kind, AnyError, Result}` w korzeniu crate'a.
+Domyślny parametr `E` (zmiana po przeglądzie końcowym) sprawia, że `use rust7::*;` nie psuje
+dwuparametrowego `Result<T, E>` w kodzie użytkownika; `rust7::Result<T>` nadal oznacza `Result<T, AnyError>`.
 Wartości stałych są publicznym, stabilnym kontraktem. Wariant `Other(String)`
 (nigdzie nie konstruowany) zostaje usunięty.
 

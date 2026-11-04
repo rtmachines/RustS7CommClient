@@ -79,7 +79,8 @@ while !exit_request{
 ## Errors
 ---
 
-Every fallible method returns `rust7::Result<T>`, an alias for `Result<T, rust7::AnyError>`.
+Every fallible method returns `rust7::Result<T>`. The alias is `rust7::Result<T, E = rust7::AnyError>`, so
+`Result<T>` means `Result<T, AnyError>` and `use rust7::*;` does not break other two-parameter `Result<T, E>` uses.
 `AnyError` is the type of the [`anyerror`](https://crates.io/crates/anyerror) crate, re-exported by `rust7`
 (also as `rust7::error::AnyError`). The category of an error is a string constant from `rust7::kind`,
 read with `get_type()`:
@@ -115,8 +116,10 @@ if let Err(e) = client.read_db(7, 3, &mut buf) {
 
 The constant values are a stable contract; `kind::ALL` lists all 13. "Breaks the session" means the client
 disconnects itself (`connected` becomes `false`) and you must reconnect before the next operation. An error with a
-missing or unknown category should be treated as session-breaking. A failed connection attempt leaves the client
-disconnected.
+missing or unknown category should be treated as session-breaking. A connection attempt that fails after parameter
+validation leaves the client disconnected, because `connect_*` drops a previous session first; only `connect_rack_slot`
+with an out-of-range rack or slot is rejected (`kind::INVALID_FUN_PARAMETER`) before connecting and keeps the existing
+session.
 
 Each public method adds exactly one context: the method name and its parameters (for example `db=`, `start=`, `len=`,
 `ip=`, `port=`), never buffer contents or PLC data. A `Display` looks like
