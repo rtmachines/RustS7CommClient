@@ -84,3 +84,25 @@ fn invalid_rack_or_slot_is_rejected_before_connecting() {
     }
     assert!(!client.connected && client.stream.is_none());
 }
+
+#[test]
+fn only_transport_errors_break_the_session() {
+    for e in [
+        S7Error::Io(std::io::ErrorKind::TimedOut.into()),
+        S7Error::ConnectionClosed,
+        S7Error::IsoInvalidHeader,
+        S7Error::IsoInvalidTelegram,
+        S7Error::IsoFragmentedPacket,
+    ] {
+        assert!(e.breaks_session(), "{e}");
+    }
+    for e in [
+        S7Error::S7InvalidAddress,
+        S7Error::S7NotFound,
+        S7Error::S7Unspecified,
+        S7Error::InvalidFunParameter,
+        S7Error::NotConnected,
+    ] {
+        assert!(!e.breaks_session(), "{e}");
+    }
+}

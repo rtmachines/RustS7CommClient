@@ -58,8 +58,8 @@ The client reads complete bounded TCP frames and validates S7 responses against 
 request, including the reference, operation and payload length. It returns an error
 for an incomplete or inconsistent response. Writes across multiple chunks are not
 atomic: an error can occur after earlier chunks have reached the PLC. The client does
-not automatically retry writes. Discard a read buffer after an error and reconnect
-after a low-level communication error.
+not automatically retry writes. Discard a read buffer after an error. After a low-level
+communication error the client disconnects itself; reconnect before the next operation.
 
 `pdu_length` is diagnostic; changing it does not override the internal negotiated
 limits. `chunks` counts attempted read/write chunks, including a failing chunk.

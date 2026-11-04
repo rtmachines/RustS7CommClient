@@ -91,6 +91,21 @@ impl From<io::Error> for S7Error {
         S7Error::Io(err)
     }
 }
+
+impl S7Error {
+    /// Whether the stream may be out of step with the PLC after this error.
+    fn breaks_session(&self) -> bool {
+        matches!(
+            self,
+            S7Error::Io(_)
+                | S7Error::ConnectionClosed
+                | S7Error::IsoInvalidHeader
+                | S7Error::IsoInvalidTelegram
+                | S7Error::IsoFragmentedPacket
+        )
+    }
+}
+
 pub struct S7Client {
     stream: Option<TcpStream>,
     port: u16,
@@ -447,10 +462,13 @@ impl S7Client {
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
     /// - `S7Error::S7Unspecified`: Unknown S7 Error.
-    /// - `S7Error::Io`: network I/O error.
+    /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+    /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
-    /// #### Suggestion
-    /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+    /// #### Connection after errors
+    /// After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or
+    /// `IsoFragmentedPacket` the client disconnects itself; reconnect before the next
+    /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
@@ -498,7 +516,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or(S7Error::NotConnected)?;
         let stream = self.stream.as_mut().ok_or(S7Error::NotConnected)?;
         let time = Instant::now();
-        protocol::read_transfer(
+        let result = protocol::read_transfer(
             stream,
             limits,
             &mut self.reference,
@@ -511,9 +529,8 @@ impl S7Client {
             buffer,
             &mut self.chunks,
             Duration::from_millis(self.rd_timeout_ms),
-        )?;
-        self.last_time = time.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+        );
+        self.finish(result, time)
     }
 
     /// ### Writes a block of data to a specific S7 memory area.
@@ -550,10 +567,13 @@ impl S7Client {
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
     /// - `S7Error::S7Unspecified`: Unknown S7 Error.
-    /// - `S7Error::Io`: network I/O error.
+    /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+    /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
-    /// #### Suggestion
-    /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+    /// #### Connection after errors
+    /// After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or
+    /// `IsoFragmentedPacket` the client disconnects itself; reconnect before the next
+    /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
@@ -603,7 +623,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or(S7Error::NotConnected)?;
         let stream = self.stream.as_mut().ok_or(S7Error::NotConnected)?;
         let time = Instant::now();
-        protocol::write_transfer(
+        let result = protocol::write_transfer(
             stream,
             limits,
             &mut self.reference,
@@ -616,9 +636,25 @@ impl S7Client {
             buffer,
             &mut self.chunks,
             Duration::from_millis(self.rd_timeout_ms),
-        )?;
-        self.last_time = time.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+        );
+        self.finish(result, time)
+    }
+
+    /// Records the job time on success and drops a connection whose stream
+    /// may be out of step with the PLC.
+    fn finish(&mut self, result: Result<(), S7Error>, time: Instant) -> Result<(), S7Error> {
+        match result {
+            Ok(()) => {
+                self.last_time = time.elapsed().as_secs_f64() * 1000.0;
+                Ok(())
+            }
+            Err(e) => {
+                if e.breaks_session() {
+                    self.disconnect();
+                }
+                Err(e)
+            }
+        }
     }
 
     /// ### Reads a block of byte from a specific Data Block (DB)

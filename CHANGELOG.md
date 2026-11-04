@@ -6,6 +6,7 @@
 
 ### Changed
 - Read timeout bounds a whole response frame; a peer closing the socket yields `S7Error::ConnectionClosed` instead of `Io(UnexpectedEof)`
+- The client disconnects itself after transport or framing errors; PLC errors keep the connection
 
 ### Fixed
 - `cargo test` no longer runs the README example against 192.168.0.100

@@ -40,7 +40,7 @@ The connection process is quite complex, and the PLC is not a web server, so the
 **Second consideration:**
 
 There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
-In the first case, it is **strongly recommended** to disconnect from the PLC and reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
+In the first case, the client disconnects itself (`connected` becomes `false`), and you reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
 
 **Third consideration:**
 
@@ -306,10 +306,11 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
 - `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+- `S7Error::ConnectionClosed`: the PLC closed the connection.
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+##### Connection after errors
+After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
   
 ##### High level
 - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
@@ -361,10 +362,11 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
 - `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+- `S7Error::ConnectionClosed`: the PLC closed the connection.
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+##### Connection after errors
+After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
 
 ##### High level
 - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
@@ -499,6 +501,7 @@ pub connected: bool
 #### The Client is connected to the PLC
 #### Note
 - This is just a memory bit and doesn't reflect the actual state of the connection. For example, if you unplug the network cable, the underlying socket won't notice anything until the next read or write operation.
+- The client clears it after a low-level communication error (see `read_area()`).
 
 ---
 ```rust
@@ -535,6 +538,6 @@ is copied or a write is acknowledged. Negotiated PDU sizes must satisfy
 
 A multichunk write is not atomic: earlier chunks may have reached the PLC when a
 later chunk fails. No write is automatically retried. After a read error discard
-the destination buffer, since earlier chunks may have been copied. Reconnect after
-low-level communication errors. `chunks` records attempted chunks, including the
+the destination buffer, since earlier chunks may have been copied. After a low-level
+communication error the client disconnects itself; reconnect before the next operation. `chunks` records attempted chunks, including the
 failing attempt; parameter validation failures leave it zero.
