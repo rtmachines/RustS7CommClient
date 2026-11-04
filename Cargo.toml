@@ -15,3 +15,9 @@ categories = ["network-programming","api-bindings"]
 [lib]
 name = "rust7"
 path = "src/lib.rs"
+
+[dependencies]
+anyerror = { version = "0.1.13", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
