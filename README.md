@@ -14,7 +14,7 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 ---
 
 ## Quick start
-```rust
+```rust,no_run
 use rust7::client::{S7Client};
 
 fn main() {
