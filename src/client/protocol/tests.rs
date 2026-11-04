@@ -211,7 +211,7 @@ fn negotiation_rejects_bad_header_or_error() {
         let mut io = Scripted::pieces([bad]);
         assert!(
             matches!(
-                negotiate(&mut io, Duration::from_secs(1)),
+                negotiate(&mut io, 1024, Duration::from_secs(1)),
                 Err(S7Error::PduNegotiationFailed)
             ),
             "index {index}"
@@ -219,13 +219,49 @@ fn negotiation_rejects_bad_header_or_error() {
     }
     let mut io = Scripted::pieces(good.iter().map(|b| vec![*b]));
     assert_eq!(
-        negotiate(&mut io, Duration::from_secs(1))
+        negotiate(&mut io, 1024, Duration::from_secs(1))
             .unwrap()
             .pdu_length,
         480
     );
     assert_eq!(io.writes.len(), 25);
     assert_eq!(&io.writes[23..25], &[1, 0xe0]);
+}
+
+#[test]
+fn cotp_limit_caps_setup_offer() {
+    for (options, requested) in [
+        (vec![0xc0, 1, 7], 125u16),
+        (vec![0xc0, 1, 8], 253),
+        (vec![0xc0, 1, 9], 480),
+        (vec![0xc0, 1, 10], 480),
+        (vec![], 480),
+    ] {
+        let tpdu_limit = validate_connection_confirm(&connection_confirm(&options)).unwrap();
+        for accepted in [29, requested - 1, requested] {
+            let mut io = Scripted::pieces([negotiation_response(accepted)]);
+            let limits = negotiate(&mut io, tpdu_limit, Duration::from_secs(1)).unwrap();
+            assert_eq!(limits.pdu_length, accepted);
+            assert_eq!(&io.writes[23..25], &requested.to_be_bytes());
+        }
+    }
+}
+
+#[test]
+fn negotiation_rejects_size_outside_the_offer() {
+    for (tpdu_limit, requested) in [(128, 125), (256, 253), (512, 480), (1024, 480)] {
+        for accepted in [0, 28, requested + 1, 481, u16::MAX] {
+            let mut io = Scripted::pieces([negotiation_response(accepted)]);
+            assert!(
+                matches!(
+                    negotiate(&mut io, tpdu_limit, Duration::from_secs(1)),
+                    Err(S7Error::PduNegotiationFailed)
+                ),
+                "TPDU {tpdu_limit}, S7 {accepted}"
+            );
+            assert_eq!(requests(&io).len(), 1);
+        }
+    }
 }
 
 #[test]
@@ -269,6 +305,208 @@ fn connection_confirm_rejects_each_invalid_field() {
         );
     }
     assert!(validate_connection_confirm(&tpkt(&[7, 0xd0, 0, 1, 0, 1, 0, 0xc0])).is_err());
+}
+
+fn connection_confirm(options: &[u8]) -> Vec<u8> {
+    let mut body = vec![6 + options.len() as u8, 0xd0, 0, 1, 0, 1, 0];
+    body.extend_from_slice(options);
+    tpkt(&body)
+}
+
+#[test]
+fn connection_confirm_returns_effective_tpdu_limit() {
+    assert_eq!(
+        validate_connection_confirm(&connection_confirm(&[])).unwrap(),
+        1024
+    );
+    assert_eq!(
+        validate_connection_confirm(&connection_confirm(&[0xc1, 2, 1, 0])).unwrap(),
+        1024
+    );
+    for (exponent, expected) in [(7, 128), (8, 256), (9, 512), (10, 1024)] {
+        for options in [
+            vec![0xc0, 1, exponent],
+            vec![0xc1, 2, 1, 0, 0xc0, 1, exponent, 0xc2, 2, 1, 2],
+        ] {
+            assert_eq!(
+                validate_connection_confirm(&connection_confirm(&options)).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn connection_confirm_rejects_invalid_tpdu_options() {
+    for options in [
+        vec![0xc0, 0],
+        vec![0xc0, 2, 7, 0],
+        vec![0xc0, 1, 0],
+        vec![0xc0, 1, 6],
+        vec![0xc0, 1, 11],
+        vec![0xc0, 1, 255],
+        vec![0xc0, 1, 7, 0xc0, 1, 7],
+        vec![0xc0, 1, 7, 0xc0, 1, 10],
+        vec![0xc0],
+        vec![0xc0, 1],
+        vec![0xc1, 2, 0],
+    ] {
+        assert!(
+            matches!(
+                validate_connection_confirm(&connection_confirm(&options)),
+                Err(S7Error::IsoConnectionFailed)
+            ),
+            "options {options:02x?}"
+        );
+    }
+}
+
+fn error_ack(reference: u16) -> Vec<u8> {
+    let [hi, lo] = reference.to_be_bytes();
+    vec![0x32, 2, 0, 0, hi, lo, 0, 0, 0, 0, 0x81, 4]
+}
+
+#[test]
+fn terminal_error_ack_reports_plc_error() {
+    for error in [[0x81, 4], [0x81, 0], [0, 4]] {
+        let mut pdu = error_ack(0x1234);
+        pdu[10..12].copy_from_slice(&error);
+        assert!(matches!(
+            validate_read_response(&pdu, 0x1234, 2, 4),
+            Err(S7Error::S7Unspecified)
+        ));
+        assert!(matches!(
+            validate_write_response(&pdu, 0x1234),
+            Err(S7Error::S7Unspecified)
+        ));
+    }
+}
+
+#[test]
+fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
+    let limits = PduLimits::new(29).unwrap();
+    for writing in [false, true] {
+        let chunk_size = if writing { 1 } else { 11 };
+        for completed in [0, 1] {
+            let success = |reference, len| {
+                data_frame(&if writing {
+                    ack(reference, 5, &[0xff])
+                } else {
+                    read_ack(reference, &vec![42; len], false)
+                })
+            };
+            let mut io = Scripted::default();
+            if completed == 1 {
+                io.reads.push_back(Ok(success(1, chunk_size)));
+            }
+            io.reads
+                .push_back(Ok(data_frame(&error_ack(completed as u16 + 1))));
+            // A response for the next operation must remain unread after the error.
+            io.reads.push_back(Ok(success(completed as u16 + 2, 1)));
+            let mut buffer = vec![0xaa; chunk_size * 3];
+            let (mut reference, mut chunks) = (0, 0);
+            let result = if writing {
+                write_transfer(
+                    &mut io,
+                    &limits,
+                    &mut reference,
+                    transfer(17, false),
+                    &buffer,
+                    &mut chunks,
+                    Duration::from_secs(1),
+                )
+            } else {
+                read_transfer(
+                    &mut io,
+                    &limits,
+                    &mut reference,
+                    transfer(17, false),
+                    &mut buffer,
+                    &mut chunks,
+                    Duration::from_secs(1),
+                )
+            };
+            assert!(matches!(result, Err(S7Error::S7Unspecified)));
+            assert_eq!(chunks, completed + 1);
+            assert_eq!(usize::from(reference), chunks);
+            assert_eq!(requests(&io).len(), chunks);
+            assert_eq!(io.reads.len(), 1);
+            let copied = if writing { 0 } else { completed * chunk_size };
+            assert_eq!(&buffer[..copied], vec![42; copied]);
+            assert_eq!(&buffer[copied..], vec![0xaa; buffer.len() - copied]);
+            if writing {
+                write_transfer(
+                    &mut io,
+                    &limits,
+                    &mut reference,
+                    transfer(0, false),
+                    &[1],
+                    &mut chunks,
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+            } else {
+                let mut next = [0];
+                read_transfer(
+                    &mut io,
+                    &limits,
+                    &mut reference,
+                    transfer(0, false),
+                    &mut next,
+                    &mut chunks,
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                assert_eq!(next, [42]);
+            }
+            assert_eq!(requests(&io).len(), completed + 2);
+            assert!(io.reads.is_empty());
+        }
+    }
+}
+
+#[test]
+fn malformed_terminal_ack_is_not_a_plc_error_or_write_success() {
+    let good = error_ack(0x1234);
+    let mut invalid: Vec<Vec<u8>> = (0..12).map(|len| good[..len].to_vec()).collect();
+    for index in [0, 2, 3, 4, 5, 6, 7, 8, 9] {
+        let mut bad = good.clone();
+        bad[index] ^= 1;
+        invalid.push(bad);
+    }
+    for rosctr in [0, 1, 4, 7] {
+        let mut bad = good.clone();
+        bad[1] = rosctr;
+        invalid.push(bad);
+    }
+    let mut empty_ack = good.clone();
+    empty_ack[10..12].fill(0);
+    invalid.push(empty_ack);
+    for (field, extra) in [(7, vec![4, 1]), (9, vec![0xff])] {
+        let mut bad = good.clone();
+        bad[field] = extra.len() as u8;
+        bad.extend(extra);
+        invalid.push(bad);
+    }
+    let mut trailing = good.clone();
+    trailing.push(0);
+    invalid.push(trailing);
+    for pdu in invalid {
+        assert!(
+            matches!(
+                validate_read_response(&pdu, 0x1234, 2, 4),
+                Err(S7Error::IsoInvalidTelegram)
+            ),
+            "read {pdu:02x?}"
+        );
+        assert!(
+            matches!(
+                validate_write_response(&pdu, 0x1234),
+                Err(S7Error::IsoInvalidTelegram)
+            ),
+            "write {pdu:02x?}"
+        );
+    }
 }
 
 fn ack(reference: u16, function: u8, data: &[u8]) -> Vec<u8> {
@@ -444,14 +682,17 @@ fn bit_address_does_not_wrap() {
 
 #[test]
 fn large_transfer_is_complete() {
-    for pdu in [240, 480] {
-        let limits = PduLimits::new(pdu).unwrap();
+    for (tpdu, pdu, read_limit, write_limit) in [
+        (128, 125, 107, 97),
+        (256, 253, 235, 225),
+        (512, 480, 462, 452),
+        (1024, 480, 462, 452),
+        (1024, 240, 222, 212),
+    ] {
+        let mut setup = Scripted::pieces([negotiation_response(pdu)]);
+        let limits = negotiate(&mut setup, tpdu, Duration::from_secs(1)).unwrap();
         for writing in [false, true] {
-            let limit = if writing {
-                limits.write_payload
-            } else {
-                limits.read_payload
-            };
+            let limit = if writing { write_limit } else { read_limit };
             for size in [0, 1, limit - 1, limit, limit + 1, 65535, 65536, 100000] {
                 let expected: Vec<u8> = (0..size)
                     .map(|i| ((i * 17 + i / 251) % 256) as u8)
@@ -463,7 +704,9 @@ fn large_transfer_is_complete() {
                     } else {
                         read_ack((index + 1) as u16, data, false)
                     };
-                    io.reads.push_back(Ok(data_frame(&pdu)));
+                    let response = data_frame(&pdu);
+                    assert!(response.len() - 4 <= usize::from(tpdu));
+                    io.reads.push_back(Ok(response));
                 }
                 let (mut reference, mut chunks) = (0, 0);
                 if writing {
@@ -496,6 +739,7 @@ fn large_transfer_is_complete() {
                 assert_eq!(chunks, packets.len());
                 let mut offset = 0;
                 for (index, packet) in packets.iter().enumerate() {
+                    assert!(packet.len() - 4 <= usize::from(tpdu));
                     let n = usize::from(u16::from_be_bytes([packet[23], packet[24]]));
                     assert!(n > 0 && n <= limit);
                     assert_eq!(n, (size - offset).min(limit));
@@ -512,6 +756,8 @@ fn large_transfer_is_complete() {
                         assert_eq!(packet.len(), 35 + n);
                     } else {
                         assert_eq!(packet.len(), 31);
+                        assert!(18 + n <= usize::from(limits.pdu_length));
+                        assert!(3 + 18 + n <= usize::from(tpdu));
                     }
                     offset += n;
                 }

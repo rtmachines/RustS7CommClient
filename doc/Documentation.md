@@ -534,9 +534,36 @@ telegram after parameter and connection validation.
 
 TCP segmentation is handled by reading complete TPKT frames. S7 response headers,
 request references, functions, lengths and item statuses are validated before data
-is copied or a write is acknowledged. Negotiated PDU sizes must satisfy
-`28 < size <= 480`, the range supported by this implementation. The public
-`pdu_length` field is diagnostic and cannot override internal limits.
+is copied or a write is acknowledged. COTP fragmentation is not supported.
+
+The client offers a 1024-byte COTP TPDU. A Connection Confirm may select a smaller
+TPDU through parameter `0xC0`, which must occur at most once, have length 1, and
+contain an exponent from 7 through 10. Invalid or oversized selections fail with
+`IsoConnectionFailed`. If the option is absent, the client retains a local 1024-byte
+send cap for compatibility; absence is not treated as an explicit 128-byte choice.
+
+The S7 Setup Communication offer fits in one COTP TPDU, including its 3-byte header:
+
+| COTP TPDU limit (bytes) | Maximum S7 PDU offer (bytes) |
+| --- | --- |
+| 128 | 125 |
+| 256 | 253 |
+| 512 | 480 |
+| 1024 (also the local cap when `0xC0` is absent) | 480 |
+
+The CPU must select an S7 PDU size from 29 through the offered size; an out-of-range
+reply fails with `PduNegotiationFailed`. No connection is exposed until both
+handshakes succeed. Read payloads are limited to `pdu_length - 18` bytes and write
+payloads to `pdu_length - 28`, keeping requests and expected responses within one
+TPDU. The public `pdu_length` field reports the negotiated S7 size, excluding COTP;
+it is diagnostic and cannot override internal limits.
+
+A terminal S7 `ACK` (`ROSCTR=0x02`) is accepted only as a PLC error: it must have a
+12-byte header, a matching request reference, zero parameter/data lengths, and a
+nonzero error class/code pair. It returns `S7Unspecified` and keeps the session
+usable. An `ACK` without an error or with extra parameters/data is an
+`IsoInvalidTelegram` and disconnects the client. It never confirms a successful
+write. Successful reads and writes still require a validated `ACK_DATA` response.
 
 A multichunk write is not atomic: earlier chunks may have reached the PLC when a
 later chunk fails. No write is automatically retried. After a read error discard

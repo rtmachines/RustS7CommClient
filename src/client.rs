@@ -124,7 +124,7 @@ pub struct S7Client {
     conn_type: u16,
     limits: Option<protocol::PduLimits>,
     reference: u16,
-    /// PDU length negotiated by the CPU (diagnostic value).
+    /// S7 PDU length negotiated by the CPU, excluding COTP (diagnostic value).
     /// Changing this field does not change the internal negotiated limits.
     pub pdu_length: u16,
     /// Client connection status. Changing this field does not establish a connection.
@@ -348,8 +348,14 @@ impl S7Client {
     /// - `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
     /// - `S7Error::ConnectionClosed`: the peer closed the connection.
     /// - `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
-    /// - `S7Error::IsoConnectionFailed`: ISO connection failed
-    /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
+    /// - `S7Error::IsoConnectionFailed`: ISO connection failed, including an invalid TPDU size option.
+    /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed or the CPU exceeded the offered size.
+    ///
+    /// ### Negotiated limits
+    /// The S7 offer is at most 480 bytes and fits in one COTP TPDU, including its
+    /// 3-byte header. TPDU limits of 128/256/512/1024 bytes yield S7 offers of
+    /// 125/253/480/480 bytes. An omitted TPDU size option retains a local 1024-byte
+    /// send cap. The connection becomes available only after both handshakes succeed.
     ///
     pub fn connect_tsap(
         &mut self,
@@ -409,9 +415,9 @@ impl S7Client {
         stream.write_all(&iso_cr)?;
 
         let iso_resp = protocol::read_tpkt(&mut stream, 1028, rd_timeout)?;
-        protocol::validate_connection_confirm(&iso_resp)?;
+        let tpdu_limit = protocol::validate_connection_confirm(&iso_resp)?;
 
-        let limits = protocol::negotiate(&mut stream, rd_timeout)?;
+        let limits = protocol::negotiate(&mut stream, tpdu_limit, rd_timeout)?;
         self.pdu_length = limits.pdu_length;
         self.limits = Some(limits);
         self.reference = 0;
@@ -484,7 +490,7 @@ impl S7Client {
     /// #### High level
     /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
-    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC, including a terminal error `ACK`.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -589,7 +595,7 @@ impl S7Client {
     /// #### High level
     /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
-    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC, including a terminal error `ACK`.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
