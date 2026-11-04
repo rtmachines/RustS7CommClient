@@ -1,23 +1,70 @@
-//! Error type of the crate: `AnyError` tagged with a stable category from [`kind`].
+//! Error type of the crate: [`AnyError`] tagged with a stable category from [`kind`].
+//!
+//! Compare the category with the constants in [`kind`]; the strings are a stable
+//! contract. Every public client method adds one context (method name and
+//! parameters, never buffer contents), so `{e}` prints the category and message
+//! and `{e:#}` also prints the context and the `source:` chain.
+//!
+//! ```
+//! fn configure(c: &mut rust7::S7Client) -> rust7::Result<()> {
+//!     c.set_connection_port(102)?;
+//!     Ok(())
+//! }
+//!
+//! let mut client = rust7::S7Client::new();
+//! assert!(configure(&mut client).is_ok());
+//! ```
+//!
+//! ```
+//! let mut client = rust7::S7Client::new();
+//! let e = client.set_connection_port(0).unwrap_err();
+//! assert_eq!(e.get_type(), Some(rust7::kind::INVALID_FUN_PARAMETER));
+//! ```
+//!
+//! `S7Error` from 0.1 no longer exists:
+//!
+//! ```compile_fail
+//! use rust7::S7Error;
+//! ```
+//!
+//! ```compile_fail
+//! use rust7::client::S7Error;
+//! ```
 
 pub use anyerror::AnyError;
 
+/// Result alias with [`AnyError`] as the error type.
 pub type Result<T> = std::result::Result<T, AnyError>;
 
+/// Stable category strings returned by [`AnyError::get_type`](crate::AnyError::get_type).
 pub mod kind {
+    /// Socket or name-resolution I/O failure. Breaks the session.
     pub const IO: &str = "rust7::Io";
+    /// The operation needs a connected client. Keeps the session.
     pub const NOT_CONNECTED: &str = "rust7::NotConnected";
+    /// The address resolves to no socket address. Raised while connecting; the client stays disconnected.
     pub const TCP_CONNECTION_FAILED: &str = "rust7::TcpConnectionFailed";
+    /// The peer closed the TCP connection. Breaks the session.
     pub const CONNECTION_CLOSED: &str = "rust7::ConnectionClosed";
+    /// ISO-on-TCP connection request was rejected or malformed. Raised while connecting; the client stays disconnected.
     pub const ISO_CONNECTION_FAILED: &str = "rust7::IsoConnectionFailed";
+    /// Fragmented ISO packet (COTP fragmentation is unsupported). Breaks the session.
     pub const ISO_FRAGMENTED_PACKET: &str = "rust7::IsoFragmentedPacket";
+    /// Invalid TPKT/ISO header. Breaks the session.
     pub const ISO_INVALID_HEADER: &str = "rust7::IsoInvalidHeader";
+    /// Inconsistent or malformed telegram. Breaks the session.
     pub const ISO_INVALID_TELEGRAM: &str = "rust7::IsoInvalidTelegram";
+    /// S7 PDU size negotiation failed. Raised while connecting; the client stays disconnected.
     pub const PDU_NEGOTIATION_FAILED: &str = "rust7::PduNegotiationFailed";
+    /// A parameter was rejected before any I/O. Keeps the session.
     pub const INVALID_FUN_PARAMETER: &str = "rust7::InvalidFunParameter";
+    /// The PLC reports that the resource (for example a DB) does not exist. Keeps the session.
     pub const S7_NOT_FOUND: &str = "rust7::S7NotFound";
+    /// The PLC rejected the address (out of range or optimized DB). Keeps the session.
     pub const S7_INVALID_ADDRESS: &str = "rust7::S7InvalidAddress";
+    /// Other error reported by the PLC. Keeps the session.
     pub const S7_UNSPECIFIED: &str = "rust7::S7Unspecified";
+    /// All 13 categories.
     pub const ALL: &[&str] = &[
         IO,
         NOT_CONNECTED,

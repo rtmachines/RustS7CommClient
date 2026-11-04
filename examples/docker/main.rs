@@ -33,7 +33,7 @@ fn read_byte_s7(s7_client: &mut S7Client, db_number: u16) {
                 Err(e) => println!("Error decoding ASCII: {}", e),    // Handle error
             }
         }
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 }
 
@@ -78,7 +78,7 @@ fn read_byte_s7_second_db(s7_client: &mut S7Client, db_number: u16) {
             }
             print!("\nLearn to avoid NULL Values");
         }
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 }
 
@@ -92,7 +92,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
             println!("Chunks        : {}", s7_client.chunks);
             println!("Value read    : {}", value)
         }
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
     println!("\n[SECOND TIME] Attempt to read DB1.DBX72.7"); // 01001000, will be false since it's 0 (Counting <- (7,6,5,4,3,2,1,0))
@@ -103,7 +103,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
             println!("Chunks        : {}", s7_client.chunks);
             println!("Value read    : {}", value)
         }
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
     println!("\n[THIRD TIME] Attempt to read DB1.DBX72.8"); // 01001000, will be throwing an error since it's out of index (Counting <- (7,6,5,4,3,2,1,0))
@@ -114,7 +114,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
             println!("Chunks        : {}", s7_client.chunks);
             println!("Value read    : {}", value)
         }
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 }
 
@@ -134,7 +134,7 @@ fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
             println!("Job time (ms) : {:.3}", s7_client.last_time);
             println!("Chunks        : {}", s7_client.chunks);
         }
-        Err(e) => eprintln!("Write failed: {}", e),
+        Err(e) => eprintln!("Write failed: {e:#}"),
     }
 }
 
@@ -148,7 +148,7 @@ fn write_bit_s7(s7_client: &mut S7Client, db_number: u16) {
             println!("Job time (ms) : {:.3}", s7_client.last_time);
             println!("Chunks        : {}", s7_client.chunks);
         }
-        Err(e) => eprintln!("Write failed: {}", e),
+        Err(e) => eprintln!("Write failed: {e:#}"),
     }
 }
 
@@ -164,7 +164,7 @@ fn main() {
             println!("Job time (ms) : {:.3}", client.last_time);
         }
         Err(e) => {
-            eprintln!("Connection failed: {}", e);
+            eprintln!("Connection failed: {e:#}");
             return;
         }
     }

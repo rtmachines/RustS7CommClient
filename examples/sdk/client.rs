@@ -13,7 +13,7 @@ fn main() {
             println!("Job time (ms) : {:.3}", client.last_time);
         },
         Err(e) => {
-            eprintln!("Connection failed: {}", e);
+            eprintln!("Connection failed: {e:#}");
             return;
         }
     }
@@ -35,7 +35,7 @@ fn main() {
                 println!();
             }
         },
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
     // Writes 1024 byte to DB100 
@@ -53,7 +53,7 @@ fn main() {
             println!("Job time (ms) : {:.3}", client.last_time);
             println!("Chunks        : {}", client.chunks);           
         },
-        Err(e) => eprintln!("Write failed: {}", e),
+        Err(e) => eprintln!("Write failed: {e:#}"),
     }
 
     // Read a bit 
@@ -66,7 +66,7 @@ fn main() {
             println!("Chunks        : {}", client.chunks);           
             println!("Value read    : {}", value)
         },
-        Err(e) => eprintln!("Read failed: {}", e),
+        Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
     // Write a bit 
@@ -78,7 +78,7 @@ fn main() {
             println!("Job time (ms) : {:.3}", client.last_time);
             println!("Chunks        : {}", client.chunks);           
         },
-        Err(e) => eprintln!("Write failed: {}", e),
+        Err(e) => eprintln!("Write failed: {e:#}"),
     }
 
     client.disconnect();
