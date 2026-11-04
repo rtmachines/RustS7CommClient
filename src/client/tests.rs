@@ -106,3 +106,12 @@ fn only_transport_errors_break_the_session() {
         assert!(!e.breaks_session(), "{e}");
     }
 }
+
+#[test]
+fn s7_error_is_std_error_with_io_source() {
+    let err: Box<dyn std::error::Error> = Box::new(S7Error::from(std::io::Error::from(
+        std::io::ErrorKind::TimedOut,
+    )));
+    assert!(err.source().is_some());
+    assert!(std::error::Error::source(&S7Error::NotConnected).is_none());
+}

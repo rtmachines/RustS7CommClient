@@ -140,7 +140,7 @@ In this case, use `CT_OP` or `CT_S7`.
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. The client must not be connected (that is, call this method before connecting).
@@ -162,7 +162,7 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
@@ -182,7 +182,7 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 ### Notes
 1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
@@ -258,10 +258,12 @@ changed it via `set_connection_port()`
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::TcpConnectionFailed`: TCP connection could not be established.
+- `S7Error::TcpConnectionFailed`: the address resolves to no socket address.
+- `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+- `S7Error::ConnectionClosed`: the peer closed the connection.
+- `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
 - `S7Error::IsoConnectionFailed`: ISO connection failed
 - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
-- `S7Error::Io`: network I/O error.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -313,7 +315,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
   
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -369,7 +371,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
 
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
@@ -447,7 +449,7 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
  `Ok(<bool>)` or `Err(<S7Error>)`
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by read_area()
 
  #### Suggestion
@@ -484,7 +486,7 @@ To write **1** into DB10.DBX71.4 use:
 `Ok(())` Operation succeeded.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by write_area()
 
 #### Notes

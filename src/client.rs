@@ -92,6 +92,15 @@ impl From<io::Error> for S7Error {
     }
 }
 
+impl std::error::Error for S7Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            S7Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl S7Error {
     /// Whether the stream may be out of step with the PLC after this error.
     fn breaks_session(&self) -> bool {
@@ -187,7 +196,7 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// #### Notes
     /// 1. The client must not be connected (that is, call this method before connecting).
@@ -214,7 +223,7 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
     /// 1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
@@ -248,7 +257,7 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
     /// 1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
@@ -335,10 +344,12 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::TcpConnectionFailed`: TCP connection could not be established.
+    /// - `S7Error::TcpConnectionFailed`: the address resolves to no socket address.
+    /// - `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+    /// - `S7Error::ConnectionClosed`: the peer closed the connection.
+    /// - `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
     /// - `S7Error::IsoConnectionFailed`: ISO connection failed
     /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
-    /// - `S7Error::Io`: network I/O error.
     ///
     pub fn connect_tsap(
         &mut self,
@@ -471,8 +482,8 @@ impl S7Client {
     /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -576,8 +587,8 @@ impl S7Client {
     /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
@@ -703,7 +714,7 @@ impl S7Client {
     /// `Ok(<bool>)` or `Err(<S7Error>)`
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - Other reported by read_area()
     ///
     /// ### Suggestion
@@ -775,8 +786,8 @@ impl S7Client {
     /// `Ok(())` Operation succeeded.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - Other reported by read_area()
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - Other reported by write_area()
     ///
     /// ### Notes
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
