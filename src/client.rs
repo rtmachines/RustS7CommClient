@@ -2,6 +2,7 @@
 // Copyright 2025 - Davide Nardella
 
 use crate::error::{self, Result};
+use anyerror::AddContext;
 use std::io::Write;
 use std::net::Shutdown;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -135,7 +136,8 @@ impl S7Client {
     ///    
     pub fn set_connection_type(&mut self, connection_type: u16) -> Result<()> {
         if !(CT_PG..=CT_S7).contains(&connection_type) {
-            return Err(error::invalid_fun_parameter());
+            return Err(error::invalid_fun_parameter()
+                .add_context(|| format!("set_connection_type connection_type={connection_type}")));
         }
 
         self.conn_type = connection_type;
@@ -167,7 +169,11 @@ impl S7Client {
         wr_timeout_ms: u64,
     ) -> Result<()> {
         if co_timeout_ms == 0 || rd_timeout_ms == 0 || wr_timeout_ms == 0 {
-            return Err(error::invalid_fun_parameter());
+            return Err(error::invalid_fun_parameter().add_context(|| {
+                format!(
+                    "set_timeout co_timeout_ms={co_timeout_ms} rd_timeout_ms={rd_timeout_ms} wr_timeout_ms={wr_timeout_ms}"
+                )
+            }));
         }
 
         self.co_timeout_ms = co_timeout_ms;
@@ -196,7 +202,8 @@ impl S7Client {
     ///
     pub fn set_connection_port(&mut self, port: u16) -> Result<()> {
         if port == 0 {
-            return Err(error::invalid_fun_parameter());
+            return Err(error::invalid_fun_parameter()
+                .add_context(|| format!("set_connection_port port={port}")));
         }
 
         self.port = port;
@@ -214,7 +221,8 @@ impl S7Client {
     /// For Notes, Return and Errors look at `connect_tsap()`
     ///
     pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<()> {
-        self.connect_rack_slot(ip, 0, 0)
+        self.connect_rack_slot_impl(ip, 0, 0)
+            .add_context(|| format!("connect_s71200_1500 ip={ip} port={}", self.port))
     }
 
     /// ### Connects to the S7300 family
@@ -227,7 +235,8 @@ impl S7Client {
     /// For Notes, Return and Errors look at `connect_tsap()`
     ///
     pub fn connect_s7300(&mut self, ip: &str) -> Result<()> {
-        self.connect_rack_slot(ip, 0, 2)
+        self.connect_rack_slot_impl(ip, 0, 2)
+            .add_context(|| format!("connect_s7300 ip={ip} port={}", self.port))
     }
 
     /// ### Connects to a Siemens PLC/Drive using Rack and Slot
@@ -252,9 +261,18 @@ impl S7Client {
     /// For Notes, Return and other Errors look at `connect_tsap()`
     ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<()> {
+        self.connect_rack_slot_impl(ip, rack, slot).add_context(|| {
+            format!(
+                "connect_rack_slot ip={ip} port={} rack={rack} slot={slot}",
+                self.port
+            )
+        })
+    }
+
+    fn connect_rack_slot_impl(&mut self, ip: &str, rack: u16, slot: u16) -> Result<()> {
         let local_tsap: u16 = 0x0100;
         let remote_tsap = protocol::remote_tsap(self.conn_type, rack, slot)?;
-        self.connect_tsap(ip, local_tsap, remote_tsap)
+        self.connect_tsap_impl(ip, local_tsap, remote_tsap)
     }
 
     /// ### Connects to a Siemens ISO-Hardware using TSAP records
@@ -289,6 +307,16 @@ impl S7Client {
     /// send cap. The connection becomes available only after both handshakes succeed.
     ///
     pub fn connect_tsap(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<()> {
+        self.connect_tsap_impl(ip, local_tsap, remote_tsap)
+            .add_context(|| {
+                format!(
+                    "connect_tsap ip={ip} port={} local_tsap={local_tsap:#06x} remote_tsap={remote_tsap:#06x}",
+                    self.port
+                )
+            })
+    }
+
+    fn connect_tsap_impl(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<()> {
         self.disconnect();
         self.last_time = 0.0;
         let start_time = Instant::now();
@@ -446,6 +474,12 @@ impl S7Client {
         buffer: &mut [u8],
     ) -> Result<()> {
         self.read_area_impl(area, db_number, u32::from(start), wordlen, buffer)
+            .add_context(|| {
+                format!(
+                    "read_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
+                    buffer.len()
+                )
+            })
     }
 
     fn read_area_impl(
@@ -553,6 +587,12 @@ impl S7Client {
         buffer: &[u8],
     ) -> Result<()> {
         self.write_area_impl(area, db_number, u32::from(start), wordlen, buffer)
+            .add_context(|| {
+                format!(
+                    "write_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
+                    buffer.len()
+                )
+            })
     }
 
     fn write_area_impl(
@@ -624,7 +664,8 @@ impl S7Client {
     /// For further info, please refer to `read_area()`
     ///
     pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> Result<()> {
-        self.read_area(S7_AREA_DB, db_number, start, S7_WL_BYTE, buffer)
+        self.read_area_impl(S7_AREA_DB, db_number, u32::from(start), S7_WL_BYTE, buffer)
+            .add_context(|| format!("read_db db={db_number} start={start} len={}", buffer.len()))
     }
 
     /// ### Reads a bit from a specific S7 memory area
@@ -667,6 +708,21 @@ impl S7Client {
         byte_num: u16,
         bit_idx: u8,
     ) -> Result<bool> {
+        self.read_bit_impl(area, db_number, byte_num, bit_idx)
+            .add_context(|| {
+                format!(
+                    "read_bit area={area:#04x} db={db_number} byte_num={byte_num} bit_idx={bit_idx}"
+                )
+            })
+    }
+
+    fn read_bit_impl(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        byte_num: u16,
+        bit_idx: u8,
+    ) -> Result<bool> {
         self.last_time = 0.0;
         self.chunks = 0;
         let start = protocol::bit_start(byte_num, bit_idx)?;
@@ -695,7 +751,8 @@ impl S7Client {
     /// For further info, please refer to `write_area()`
     ///
     pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> Result<()> {
-        self.write_area(S7_AREA_DB, db_number, start, S7_WL_BYTE, buffer)
+        self.write_area_impl(S7_AREA_DB, db_number, u32::from(start), S7_WL_BYTE, buffer)
+            .add_context(|| format!("write_db db={db_number} start={start} len={}", buffer.len()))
     }
 
     /// ### Writes a bit to a specific S7 memory area
@@ -729,6 +786,22 @@ impl S7Client {
     /// For further info, please refer to `write_area()`
     ///
     pub fn write_bit(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        byte_num: u16,
+        bit_idx: u8,
+        value: bool,
+    ) -> Result<()> {
+        self.write_bit_impl(area, db_number, byte_num, bit_idx, value)
+            .add_context(|| {
+                format!(
+                    "write_bit area={area:#04x} db={db_number} byte_num={byte_num} bit_idx={bit_idx}"
+                )
+            })
+    }
+
+    fn write_bit_impl(
         &mut self,
         area: u8,
         db_number: u16,
