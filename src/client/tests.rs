@@ -72,3 +72,46 @@ fn public_status_fields_cannot_create_a_connection() {
     assert!(client.stream.is_none());
     assert!(client.limits.is_none());
 }
+
+#[test]
+fn invalid_rack_or_slot_is_rejected_before_connecting() {
+    let mut client = S7Client::new();
+    for (rack, slot) in [(8, 0), (0, 32), (2048, 0)] {
+        assert!(matches!(
+            client.connect_rack_slot("127.0.0.1", rack, slot),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+    assert!(!client.connected && client.stream.is_none());
+}
+
+#[test]
+fn only_transport_errors_break_the_session() {
+    for e in [
+        S7Error::Io(std::io::ErrorKind::TimedOut.into()),
+        S7Error::ConnectionClosed,
+        S7Error::IsoInvalidHeader,
+        S7Error::IsoInvalidTelegram,
+        S7Error::IsoFragmentedPacket,
+    ] {
+        assert!(e.breaks_session(), "{e}");
+    }
+    for e in [
+        S7Error::S7InvalidAddress,
+        S7Error::S7NotFound,
+        S7Error::S7Unspecified,
+        S7Error::InvalidFunParameter,
+        S7Error::NotConnected,
+    ] {
+        assert!(!e.breaks_session(), "{e}");
+    }
+}
+
+#[test]
+fn s7_error_is_std_error_with_io_source() {
+    let err: Box<dyn std::error::Error> = Box::new(S7Error::from(std::io::Error::from(
+        std::io::ErrorKind::TimedOut,
+    )));
+    assert!(err.source().is_some());
+    assert!(std::error::Error::source(&S7Error::NotConnected).is_none());
+}

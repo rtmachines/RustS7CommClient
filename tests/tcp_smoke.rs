@@ -53,7 +53,15 @@ fn reply(reference: &[u8], function: u8, data: &[u8]) -> Vec<u8> {
     packet
 }
 
-fn serve(mut stream: TcpStream, bad_pdu: bool) -> io::Result<()> {
+#[derive(Clone, Copy, PartialEq)]
+enum Scenario {
+    Normal,
+    BadPdu,
+    LateReply,
+    PlcError,
+}
+
+fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_nodelay(true)?;
@@ -67,14 +75,18 @@ fn serve(mut stream: TcpStream, bad_pdu: bool) -> io::Result<()> {
     )?;
     let pn = frame(&mut stream)?;
     assert_eq!(&pn[17..], &[0xf0, 0, 0, 1, 0, 1, 1, 0xe0]);
-    let size = if bad_pdu { 28u16 } else { 240u16 };
+    let size = if scenario == Scenario::BadPdu {
+        28u16
+    } else {
+        240u16
+    };
     let mut response = vec![
         3, 0, 0, 27, 2, 0xf0, 0x80, 0x32, 3, 0, 0, pn[11], pn[12], 0, 8, 0, 0, 0, 0, 0xf0, 0, 0, 1,
         0, 1, 0, 0,
     ];
     response[25..27].copy_from_slice(&size.to_be_bytes());
     send_split(&mut stream, &response)?;
-    if bad_pdu {
+    if scenario == Scenario::BadPdu {
         return Ok(());
     }
     let mut written = Vec::new();
@@ -93,7 +105,18 @@ fn serve(mut stream: TcpStream, bad_pdu: bool) -> io::Result<()> {
             assert_eq!(address, 0x07ffff);
             assert_eq!(count, 1);
         }
+        let first = reference == 1;
+        if scenario == Scenario::LateReply {
+            // Reply after the client's read timeout; the client is gone by then.
+            thread::sleep(Duration::from_millis(400));
+            let _ = send_split(
+                &mut stream,
+                &reply(&request[11..13], 4, &[0xff, 4, 0, 32, 0, 0, 0, 0]),
+            );
+            return Ok(());
+        }
         let data = match (request[17], request[22]) {
+            (4, 2) if first && scenario == Scenario::PlcError => vec![5, 0, 0, 0],
             (4, 2) => {
                 let offset = address as usize / 8;
                 let mut data = vec![0xff, 4, ((count * 8) >> 8) as u8, (count * 8) as u8];
@@ -123,7 +146,7 @@ fn serve(mut stream: TcpStream, bad_pdu: bool) -> io::Result<()> {
     }
 }
 
-fn run(bad_pdu: bool) {
+fn run(scenario: Scenario) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback sockets required");
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
@@ -132,7 +155,7 @@ fn run(bad_pdu: bool) {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 match listener.accept() {
-                    Ok((stream, _)) => return serve(stream, bad_pdu),
+                    Ok((stream, _)) => return serve(stream, scenario),
                     Err(e)
                         if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
                     {
@@ -145,13 +168,44 @@ fn run(bad_pdu: bool) {
         let mut client = S7Client::new();
         client.set_connection_port(port).unwrap();
         client.set_timeout(1000, 1000, 1000).unwrap();
+        if scenario == Scenario::LateReply {
+            client.set_timeout(1000, 200, 1000).unwrap();
+        }
         let result = client.connect_s71200_1500("127.0.0.1");
-        if bad_pdu {
+        if scenario == Scenario::BadPdu {
             assert!(matches!(result, Err(S7Error::PduNegotiationFailed)));
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
+        } else if scenario == Scenario::LateReply {
+            result.unwrap();
+            let mut buffer = [0; 4];
+            assert!(matches!(
+                client.read_db(100, 0, &mut buffer),
+                Err(S7Error::Io(_))
+            ));
+            assert!(!client.connected);
+            assert_eq!(client.pdu_length, 0);
+            assert!(matches!(
+                client.read_db(100, 0, &mut buffer),
+                Err(S7Error::NotConnected)
+            ));
+        } else if scenario == Scenario::PlcError {
+            result.unwrap();
+            let mut buffer = [0; 4];
+            assert!(matches!(
+                client.read_db(100, 0, &mut buffer),
+                Err(S7Error::S7InvalidAddress)
+            ));
+            assert!(client.connected);
+            client.read_db(100, 0, &mut buffer).unwrap();
+            assert_eq!(buffer, [0, 1, 2, 3]);
         } else {
             result.unwrap();
+            assert!(matches!(
+                client.connect_rack_slot("127.0.0.1", 8, 0),
+                Err(S7Error::InvalidFunParameter)
+            ));
+            assert!(client.connected); // The existing connection is kept.
             client.pdu_length = 65535; // Diagnostics cannot override negotiated limits.
             let mut read = vec![0xaa; 65536];
             client.read_db(100, 0, &mut read).unwrap();
@@ -173,11 +227,23 @@ fn run(bad_pdu: bool) {
 #[test]
 #[ignore = "requires permission to open loopback sockets"]
 fn tcp_smoke() {
-    run(false);
+    run(Scenario::Normal);
 }
 
 #[test]
 #[ignore = "requires permission to open loopback sockets"]
 fn failed_negotiation_keeps_client_disconnected() {
-    run(true);
+    run(Scenario::BadPdu);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn late_reply_disconnects_client() {
+    run(Scenario::LateReply);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn plc_error_keeps_connection() {
+    run(Scenario::PlcError);
 }

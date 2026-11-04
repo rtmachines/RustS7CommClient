@@ -40,7 +40,7 @@ The connection process is quite complex, and the PLC is not a web server, so the
 **Second consideration:**
 
 There is no such thing as problem-free communication, and this case is no exception. The library reports two categories of errors: low-level errors such as TCP, corrupt headers due to fragmented packets, etc., and high-level errors, such as a read request from a non-existent database.
-In the first case, it is **strongly recommended** to disconnect from the PLC and reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
+In the first case (transport and framing errors, listed for each read/write method), the client disconnects itself (`connected` becomes `false`), and you reconnect before performing any other operations. This behavior is the same as that adopted by WinCC and all other SCADA programs.
 
 **Third consideration:**
 
@@ -140,7 +140,7 @@ In this case, use `CT_OP` or `CT_S7`.
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. The client must not be connected (that is, call this method before connecting).
@@ -155,17 +155,17 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 
 #### Parameters
 - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
-- `rd_timeout_ms` : Read Connection timeout (ms) (Default = 1000 ms)
+- `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
 - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
 
 #### Returns
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
-1. Values must be > 0, otherwise they are ignored
+1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
@@ -182,10 +182,10 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 ### Notes
-1. Value must be > 0, otherwise it is ignored
+1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
@@ -228,10 +228,13 @@ Ultimately, you will need of this method only to connect to S7400, WinAC or othe
  
 ### Parameters
 - `ip` : PLC IPV4 address.
-- `rack` : CPU/CU Rack.
-- `slot` : CPU/CU Slot.
+- `rack` : CPU/CU Rack (0..=7).
+- `slot` : CPU/CU Slot (0..=31).
 
-For Notes, Return and Errors look at `connect_tsap()`
+#### Errors
+- `S7Error::InvalidFunParameter`: rack or slot out of range. Returned before connecting; an existing connection is kept.
+
+For Notes, Return and other Errors look at `connect_tsap()`
 
 ---
 ```rust
@@ -255,10 +258,12 @@ changed it via `set_connection_port()`
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::TcpConnectionFailed`: TCP connection could not be established.
+- `S7Error::TcpConnectionFailed`: the address resolves to no socket address.
+- `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+- `S7Error::ConnectionClosed`: the peer closed the connection.
+- `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
 - `S7Error::IsoConnectionFailed`: ISO connection failed
 - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
-- `S7Error::Io`: network I/O error.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -302,14 +307,15 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidHeader`: Invalid ISO Header
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+- `S7Error::ConnectionClosed`: the PLC closed the connection.
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+##### Connection after errors
+After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
   
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7Unspecified`: Other error reported by the PLC.
 - `S7Error::S7InvalidAddress`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -357,14 +363,15 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `S7Error::IsoInvalidHeader`: Invalid ISO Header
 - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
 - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-- `S7Error::S7Unspecified`: Unknown S7 Error.
-- `S7Error::Io`: network I/O error.
+- `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+- `S7Error::ConnectionClosed`: the PLC closed the connection.
 
-##### Suggestion
-In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+##### Connection after errors
+After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or `IsoFragmentedPacket` the client disconnects itself; reconnect before the next operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
 
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7Unspecified`: Other error reported by the PLC.
 - `S7Error::S7InvalidAddress`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
@@ -442,7 +449,7 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
  `Ok(<bool>)` or `Err(<S7Error>)`
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by read_area()
 
  #### Suggestion
@@ -479,7 +486,7 @@ To write **1** into DB10.DBX71.4 use:
 `Ok(())` Operation succeeded.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by write_area()
 
 #### Notes
@@ -496,6 +503,7 @@ pub connected: bool
 #### The Client is connected to the PLC
 #### Note
 - This is just a memory bit and doesn't reflect the actual state of the connection. For example, if you unplug the network cable, the underlying socket won't notice anything until the next read or write operation.
+- The client clears it after a low-level communication error (see `read_area()`).
 
 ---
 ```rust
@@ -532,6 +540,6 @@ is copied or a write is acknowledged. Negotiated PDU sizes must satisfy
 
 A multichunk write is not atomic: earlier chunks may have reached the PLC when a
 later chunk fails. No write is automatically retried. After a read error discard
-the destination buffer, since earlier chunks may have been copied. Reconnect after
-low-level communication errors. `chunks` records attempted chunks, including the
+the destination buffer, since earlier chunks may have been copied. After a low-level
+communication error the client disconnects itself; reconnect before the next operation. `chunks` records attempted chunks, including the
 failing attempt; parameter validation failures leave it zero.

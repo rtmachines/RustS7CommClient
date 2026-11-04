@@ -91,6 +91,30 @@ impl From<io::Error> for S7Error {
         S7Error::Io(err)
     }
 }
+
+impl std::error::Error for S7Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            S7Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl S7Error {
+    /// Whether the stream may be out of step with the PLC after this error.
+    fn breaks_session(&self) -> bool {
+        matches!(
+            self,
+            S7Error::Io(_)
+                | S7Error::ConnectionClosed
+                | S7Error::IsoInvalidHeader
+                | S7Error::IsoInvalidTelegram
+                | S7Error::IsoFragmentedPacket
+        )
+    }
+}
+
 pub struct S7Client {
     stream: Option<TcpStream>,
     port: u16,
@@ -172,7 +196,7 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// #### Notes
     /// 1. The client must not be connected (that is, call this method before connecting).
@@ -192,17 +216,17 @@ impl S7Client {
     ///
     /// ### Parameters
     /// - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
-    /// - `rd_timeout_ms` : Read Connection timeout (ms) (Default = 1000 ms)
+    /// - `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
     /// - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
-    /// 1. Values must be > 0, otherwise they are ignored
+    /// 1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
     /// 2. The client must not be connected (that is, call this method before connecting).
     ///
     pub fn set_timeout(
@@ -233,10 +257,10 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
-    /// 1. Value must be > 0, otherwise it is ignored
+    /// 1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
     /// 2. The client must not be connected (that is, call this method before connecting).
     ///
     pub fn set_connection_port(&mut self, port: u16) -> Result<(), S7Error> {
@@ -286,15 +310,19 @@ impl S7Client {
     ///
     /// ### Parameters
     /// - `ip` : PLC IPV4 address.
-    /// - `rack` : CPU/CU Rack.
-    /// - `slot` : CPU/CU Slot.
+    /// - `rack` : CPU/CU Rack (0..=7).
+    /// - `slot` : CPU/CU Slot (0..=31).
+    ///
+    /// ### Errors
+    /// - `S7Error::InvalidFunParameter`: rack or slot out of range.
+    ///   Returned before connecting; an existing connection is kept.
     ///
     /// ---
-    /// For Notes, Return and Errors look at `connect_tsap()`
+    /// For Notes, Return and other Errors look at `connect_tsap()`
     ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
         let local_tsap: u16 = 0x0100;
-        let remote_tsap: u16 = (self.conn_type << 8) + (rack * 0x20) + slot;
+        let remote_tsap = protocol::remote_tsap(self.conn_type, rack, slot)?;
         self.connect_tsap(ip, local_tsap, remote_tsap)
     }
 
@@ -316,10 +344,12 @@ impl S7Client {
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
-    /// - `S7Error::TcpConnectionFailed`: TCP connection could not be established.
+    /// - `S7Error::TcpConnectionFailed`: the address resolves to no socket address.
+    /// - `S7Error::Io`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+    /// - `S7Error::ConnectionClosed`: the peer closed the connection.
+    /// - `S7Error::IsoInvalidHeader` / `S7Error::IsoInvalidTelegram`: malformed or oversized TPKT reply.
     /// - `S7Error::IsoConnectionFailed`: ISO connection failed
     /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
-    /// - `S7Error::Io`: network I/O error.
     ///
     pub fn connect_tsap(
         &mut self,
@@ -378,10 +408,10 @@ impl S7Client {
 
         stream.write_all(&iso_cr)?;
 
-        let iso_resp = protocol::read_tpkt(&mut stream, 1028)?;
+        let iso_resp = protocol::read_tpkt(&mut stream, 1028, rd_timeout)?;
         protocol::validate_connection_confirm(&iso_resp)?;
 
-        let limits = protocol::negotiate(&mut stream)?;
+        let limits = protocol::negotiate(&mut stream, rd_timeout)?;
         self.pdu_length = limits.pdu_length;
         self.limits = Some(limits);
         self.reference = 0;
@@ -399,7 +429,8 @@ impl S7Client {
     /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
     ///
     /// ### Notes
-    /// A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
+    /// The client disconnects itself after transport or framing errors (see `read_area()` and
+    /// `write_area()`); calling this again is harmless.
     ///
     pub fn disconnect(&mut self) {
         if let Some(stream) = self.stream.take() {
@@ -442,15 +473,18 @@ impl S7Client {
     /// - `S7Error::IsoInvalidHeader`: Invalid ISO Header
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-    /// - `S7Error::S7Unspecified`: Unknown S7 Error.
-    /// - `S7Error::Io`: network I/O error.
+    /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+    /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
-    /// #### Suggestion
-    /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+    /// #### Connection after errors
+    /// After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or
+    /// `IsoFragmentedPacket` the client disconnects itself; reconnect before the next
+    /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -494,7 +528,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or(S7Error::NotConnected)?;
         let stream = self.stream.as_mut().ok_or(S7Error::NotConnected)?;
         let time = Instant::now();
-        protocol::read_transfer(
+        let result = protocol::read_transfer(
             stream,
             limits,
             &mut self.reference,
@@ -506,9 +540,9 @@ impl S7Client {
             },
             buffer,
             &mut self.chunks,
-        )?;
-        self.last_time = time.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+            Duration::from_millis(self.rd_timeout_ms),
+        );
+        self.finish(result, time)
     }
 
     /// ### Writes a block of data to a specific S7 memory area.
@@ -544,15 +578,18 @@ impl S7Client {
     /// - `S7Error::IsoInvalidHeader`: Invalid ISO Header
     /// - `S7Error::IsoInvalidTelegram`: Inconsistent expected telegram length.
     /// - `S7Error::IsoFragmentedPacket`: ISO Packet fragmented.
-    /// - `S7Error::S7Unspecified`: Unknown S7 Error.
-    /// - `S7Error::Io`: network I/O error.
+    /// - `S7Error::Io`: network I/O error, including a response not received within the read timeout.
+    /// - `S7Error::ConnectionClosed`: the PLC closed the connection.
     ///
-    /// #### Suggestion
-    /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
+    /// #### Connection after errors
+    /// After `Io`, `ConnectionClosed`, `IsoInvalidHeader`, `IsoInvalidTelegram` or
+    /// `IsoFragmentedPacket` the client disconnects itself; reconnect before the next
+    /// operation. PLC errors (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`) keep the connection.
     ///
     /// #### High level
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - `S7Error::S7NotFound`: The resource was not found (e.g. Inexistent DB).
+    /// - `S7Error::S7Unspecified`: Other error reported by the PLC.
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
@@ -598,7 +635,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or(S7Error::NotConnected)?;
         let stream = self.stream.as_mut().ok_or(S7Error::NotConnected)?;
         let time = Instant::now();
-        protocol::write_transfer(
+        let result = protocol::write_transfer(
             stream,
             limits,
             &mut self.reference,
@@ -610,9 +647,26 @@ impl S7Client {
             },
             buffer,
             &mut self.chunks,
-        )?;
-        self.last_time = time.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+            Duration::from_millis(self.rd_timeout_ms),
+        );
+        self.finish(result, time)
+    }
+
+    /// Records the job time on success and drops a connection whose stream
+    /// may be out of step with the PLC.
+    fn finish(&mut self, result: Result<(), S7Error>, time: Instant) -> Result<(), S7Error> {
+        match result {
+            Ok(()) => {
+                self.last_time = time.elapsed().as_secs_f64() * 1000.0;
+                Ok(())
+            }
+            Err(e) => {
+                if e.breaks_session() {
+                    self.disconnect();
+                }
+                Err(e)
+            }
+        }
     }
 
     /// ### Reads a block of byte from a specific Data Block (DB)
@@ -661,7 +715,7 @@ impl S7Client {
     /// `Ok(<bool>)` or `Err(<S7Error>)`
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
     /// - Other reported by read_area()
     ///
     /// ### Suggestion
@@ -733,8 +787,8 @@ impl S7Client {
     /// `Ok(())` Operation succeeded.
     ///
     /// ### Errors
-    /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// - Other reported by read_area()
+    /// - `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
+    /// - Other reported by write_area()
     ///
     /// ### Notes
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
