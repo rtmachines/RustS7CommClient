@@ -228,10 +228,13 @@ Ultimately, you will need of this method only to connect to S7400, WinAC or othe
  
 ### Parameters
 - `ip` : PLC IPV4 address.
-- `rack` : CPU/CU Rack.
-- `slot` : CPU/CU Slot.
+- `rack` : CPU/CU Rack (0..=7).
+- `slot` : CPU/CU Slot (0..=31).
 
-For Notes, Return and Errors look at `connect_tsap()`
+#### Errors
+- `S7Error::InvalidFunParameter`: rack or slot out of range. Returned before connecting; an existing connection is kept.
+
+For Notes, Return and other Errors look at `connect_tsap()`
 
 ---
 ```rust

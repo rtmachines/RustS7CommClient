@@ -152,6 +152,11 @@ fn run(bad_pdu: bool) {
             assert_eq!(client.pdu_length, 0);
         } else {
             result.unwrap();
+            assert!(matches!(
+                client.connect_rack_slot("127.0.0.1", 8, 0),
+                Err(S7Error::InvalidFunParameter)
+            ));
+            assert!(client.connected); // The existing connection is kept.
             client.pdu_length = 65535; // Diagnostics cannot override negotiated limits.
             let mut read = vec![0xaa; 65536];
             client.read_db(100, 0, &mut read).unwrap();

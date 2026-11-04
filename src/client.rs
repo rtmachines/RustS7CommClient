@@ -286,15 +286,19 @@ impl S7Client {
     ///
     /// ### Parameters
     /// - `ip` : PLC IPV4 address.
-    /// - `rack` : CPU/CU Rack.
-    /// - `slot` : CPU/CU Slot.
+    /// - `rack` : CPU/CU Rack (0..=7).
+    /// - `slot` : CPU/CU Slot (0..=31).
+    ///
+    /// ### Errors
+    /// - `S7Error::InvalidFunParameter`: rack or slot out of range.
+    ///   Returned before connecting; an existing connection is kept.
     ///
     /// ---
-    /// For Notes, Return and Errors look at `connect_tsap()`
+    /// For Notes, Return and other Errors look at `connect_tsap()`
     ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
         let local_tsap: u16 = 0x0100;
-        let remote_tsap: u16 = (self.conn_type << 8) + (rack * 0x20) + slot;
+        let remote_tsap = protocol::remote_tsap(self.conn_type, rack, slot)?;
         self.connect_tsap(ip, local_tsap, remote_tsap)
     }
 

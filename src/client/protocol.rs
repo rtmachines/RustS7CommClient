@@ -180,6 +180,13 @@ pub(super) fn bit_start(byte_num: u16, bit_idx: u8) -> Result<u32, S7Error> {
     Ok(u32::from(byte_num) * 8 + u32::from(bit_idx))
 }
 
+pub(super) fn remote_tsap(conn_type: u16, rack: u16, slot: u16) -> Result<u16, S7Error> {
+    if rack > 7 || slot > 31 {
+        return Err(S7Error::InvalidFunParameter);
+    }
+    Ok((conn_type << 8) | (rack << 5) | slot)
+}
+
 pub(super) fn validate_transfer(start: u32, wordlen: u8, len: usize) -> Result<usize, S7Error> {
     match wordlen {
         1 if len > 0 && start <= 0xffffff => Ok(1),

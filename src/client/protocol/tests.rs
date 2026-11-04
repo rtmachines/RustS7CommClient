@@ -575,3 +575,21 @@ fn short_read_leaves_destination_unchanged() {
     .is_err());
     assert_eq!(buffer, [42; 4]);
 }
+
+#[test]
+fn remote_tsap_encodes_and_rejects_out_of_range() {
+    for (ct, rack, slot, tsap) in [
+        (1, 0, 0, 0x0100),
+        (1, 0, 2, 0x0102),
+        (2, 1, 0, 0x0220),
+        (3, 7, 31, 0x03ff),
+    ] {
+        assert_eq!(remote_tsap(ct, rack, slot).unwrap(), tsap);
+    }
+    for (rack, slot) in [(8, 0), (0, 32), (2048, 0), (0, 65535), (65535, 65535)] {
+        assert!(matches!(
+            remote_tsap(1, rack, slot),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+}

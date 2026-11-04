@@ -72,3 +72,15 @@ fn public_status_fields_cannot_create_a_connection() {
     assert!(client.stream.is_none());
     assert!(client.limits.is_none());
 }
+
+#[test]
+fn invalid_rack_or_slot_is_rejected_before_connecting() {
+    let mut client = S7Client::new();
+    for (rack, slot) in [(8, 0), (0, 32), (2048, 0)] {
+        assert!(matches!(
+            client.connect_rack_slot("127.0.0.1", rack, slot),
+            Err(S7Error::InvalidFunParameter)
+        ));
+    }
+    assert!(!client.connected && client.stream.is_none());
+}
