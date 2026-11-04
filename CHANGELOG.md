@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Read timeout bounds a whole response frame; a peer closing the socket yields `S7Error::ConnectionClosed` instead of `Io(UnexpectedEof)`
+
 ### Fixed
 - `cargo test` no longer runs the README example against 192.168.0.100
 - `connect_rack_slot` rejects rack > 7 or slot > 31 instead of panicking or silently connecting to another TSAP

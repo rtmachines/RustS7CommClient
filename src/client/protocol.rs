@@ -1,5 +1,18 @@
 use super::S7Error;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
+
+/// A transport whose next blocking read can be bounded.
+pub(super) trait FrameRead: Read {
+    fn limit_next_read(&mut self, timeout: Duration) -> io::Result<()>;
+}
+
+impl FrameRead for TcpStream {
+    fn limit_next_read(&mut self, timeout: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PduLimits {
@@ -21,11 +34,14 @@ impl PduLimits {
     }
 }
 
-pub(super) fn negotiate<T: Read + Write>(io: &mut T) -> Result<PduLimits, S7Error> {
+pub(super) fn negotiate<T: FrameRead + Write>(
+    io: &mut T,
+    timeout: Duration,
+) -> Result<PduLimits, S7Error> {
     io.write_all(&[
         3, 0, 0, 25, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 4, 0, 0, 8, 0, 0, 0xf0, 0, 0, 1, 0, 1, 1, 0xe0,
     ])?;
-    let frame = read_tpkt(io, 487)?;
+    let frame = read_tpkt(io, 487, timeout)?;
     let pdu = data_payload(&frame).map_err(|_| S7Error::PduNegotiationFailed)?;
     // One outstanding job in each direction was requested; all these fields
     // belong to the Setup Communication ACK_DATA, not to the negotiated size.
@@ -36,9 +52,16 @@ pub(super) fn negotiate<T: Read + Write>(io: &mut T) -> Result<PduLimits, S7Erro
     PduLimits::new(u16::from_be_bytes([pdu[18], pdu[19]]))
 }
 
-pub(super) fn read_tpkt<R: Read>(reader: &mut R, max_total: usize) -> Result<Vec<u8>, S7Error> {
+pub(super) fn read_tpkt<R: FrameRead>(
+    reader: &mut R,
+    max_total: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, S7Error> {
+    // The timeout bounds the whole frame. A deadline beyond the clock range
+    // falls back to bounding each read.
+    let deadline = Instant::now().checked_add(timeout);
     let mut header = [0; 4];
-    reader.read_exact(&mut header)?;
+    read_full(reader, &mut header, deadline, timeout)?;
     if header[0] != 3 || header[1] != 0 {
         return Err(S7Error::IsoInvalidHeader);
     }
@@ -48,8 +71,34 @@ pub(super) fn read_tpkt<R: Read>(reader: &mut R, max_total: usize) -> Result<Vec
     }
     let mut frame = vec![0; len];
     frame[..4].copy_from_slice(&header);
-    reader.read_exact(&mut frame[4..])?;
+    read_full(reader, &mut frame[4..], deadline, timeout)?;
     Ok(frame)
+}
+
+fn read_full<R: FrameRead>(
+    reader: &mut R,
+    buf: &mut [u8],
+    deadline: Option<Instant>,
+    timeout: Duration,
+) -> Result<(), S7Error> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let limit = match deadline {
+            Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+            None => timeout,
+        };
+        if limit.is_zero() {
+            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+        }
+        reader.limit_next_read(limit)?;
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => return Err(S7Error::ConnectionClosed),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 fn valid_tpkt(frame: &[u8]) -> bool {
@@ -279,13 +328,14 @@ fn valid_area(area: u8) -> Result<(), S7Error> {
     Ok(())
 }
 
-pub(super) fn read_transfer<T: Read + Write>(
+pub(super) fn read_transfer<T: FrameRead + Write>(
     io: &mut T,
     limits: &PduLimits,
     reference: &mut u16,
     transfer: Transfer,
     buffer: &mut [u8],
     chunks: &mut usize,
+    timeout: Duration,
 ) -> Result<(), S7Error> {
     valid_area(transfer.area)?;
     let len = validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
@@ -296,7 +346,7 @@ pub(super) fn read_transfer<T: Read + Write>(
         let req = request(&transfer, offset, count, reference, None);
         *chunks += 1;
         io.write_all(&req)?;
-        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7)?;
+        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         let data =
             validate_read_response(data_payload(&frame)?, reference, transfer.wordlen, count)?;
         buffer[offset..offset + count].copy_from_slice(data);
@@ -305,13 +355,14 @@ pub(super) fn read_transfer<T: Read + Write>(
     Ok(())
 }
 
-pub(super) fn write_transfer<T: Read + Write>(
+pub(super) fn write_transfer<T: FrameRead + Write>(
     io: &mut T,
     limits: &PduLimits,
     reference: &mut u16,
     transfer: Transfer,
     buffer: &[u8],
     chunks: &mut usize,
+    timeout: Duration,
 ) -> Result<(), S7Error> {
     valid_area(transfer.area)?;
     let len = validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
@@ -329,7 +380,7 @@ pub(super) fn write_transfer<T: Read + Write>(
         let req = request(&transfer, offset, count, reference, Some(payload));
         *chunks += 1;
         io.write_all(&req)?;
-        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7)?;
+        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         validate_write_response(data_payload(&frame)?, reference)?;
         offset += count;
     }

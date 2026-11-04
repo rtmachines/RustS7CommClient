@@ -155,7 +155,7 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 
 #### Parameters
 - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
-- `rd_timeout_ms` : Read Connection timeout (ms) (Default = 1000 ms)
+- `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
 - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
 
 #### Returns
@@ -165,7 +165,7 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
 
 #### Notes
-1. Values must be > 0, otherwise they are ignored
+1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
@@ -185,7 +185,7 @@ The default S7 Port is 102, but if you need NAT the addresses you can use this m
 - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
 
 ### Notes
-1. Value must be > 0, otherwise it is ignored
+1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
 2. The client must not be connected (that is, call this method before connecting).
 
 ---

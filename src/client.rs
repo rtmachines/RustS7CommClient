@@ -192,7 +192,7 @@ impl S7Client {
     ///
     /// ### Parameters
     /// - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
-    /// - `rd_timeout_ms` : Read Connection timeout (ms) (Default = 1000 ms)
+    /// - `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
     /// - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
     ///
     /// ### Returns
@@ -202,7 +202,7 @@ impl S7Client {
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
-    /// 1. Values must be > 0, otherwise they are ignored
+    /// 1. Values must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
     /// 2. The client must not be connected (that is, call this method before connecting).
     ///
     pub fn set_timeout(
@@ -236,7 +236,7 @@ impl S7Client {
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     ///
     /// ### Notes
-    /// 1. Value must be > 0, otherwise it is ignored
+    /// 1. Value must be > 0, otherwise `S7Error::InvalidFunParameter` is returned
     /// 2. The client must not be connected (that is, call this method before connecting).
     ///
     pub fn set_connection_port(&mut self, port: u16) -> Result<(), S7Error> {
@@ -382,10 +382,10 @@ impl S7Client {
 
         stream.write_all(&iso_cr)?;
 
-        let iso_resp = protocol::read_tpkt(&mut stream, 1028)?;
+        let iso_resp = protocol::read_tpkt(&mut stream, 1028, rd_timeout)?;
         protocol::validate_connection_confirm(&iso_resp)?;
 
-        let limits = protocol::negotiate(&mut stream)?;
+        let limits = protocol::negotiate(&mut stream, rd_timeout)?;
         self.pdu_length = limits.pdu_length;
         self.limits = Some(limits);
         self.reference = 0;
@@ -510,6 +510,7 @@ impl S7Client {
             },
             buffer,
             &mut self.chunks,
+            Duration::from_millis(self.rd_timeout_ms),
         )?;
         self.last_time = time.elapsed().as_secs_f64() * 1000.0;
         Ok(())
@@ -614,6 +615,7 @@ impl S7Client {
             },
             buffer,
             &mut self.chunks,
+            Duration::from_millis(self.rd_timeout_ms),
         )?;
         self.last_time = time.elapsed().as_secs_f64() * 1000.0;
         Ok(())

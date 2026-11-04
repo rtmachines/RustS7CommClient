@@ -1,24 +1,28 @@
 use super::*;
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct Scripted {
     reads: VecDeque<io::Result<Vec<u8>>>,
     writes: Vec<u8>,
+    delay: Duration,
+    timeouts: Vec<Duration>,
 }
 
 impl Scripted {
     fn pieces(pieces: impl IntoIterator<Item = Vec<u8>>) -> Self {
         Self {
             reads: pieces.into_iter().map(Ok).collect(),
-            writes: Vec::new(),
+            ..Self::default()
         }
     }
 }
 
 impl Read for Scripted {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        std::thread::sleep(self.delay);
         match self.reads.pop_front() {
             Some(Ok(mut bytes)) => {
                 let n = bytes.len().min(buf.len());
@@ -31,6 +35,19 @@ impl Read for Scripted {
             Some(Err(e)) => Err(e),
             None => Ok(0),
         }
+    }
+}
+
+impl FrameRead for Scripted {
+    fn limit_next_read(&mut self, timeout: Duration) -> io::Result<()> {
+        self.timeouts.push(timeout);
+        Ok(())
+    }
+}
+
+impl<T: AsRef<[u8]>> FrameRead for Cursor<T> {
+    fn limit_next_read(&mut self, _timeout: Duration) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -63,11 +80,17 @@ fn read_tpkt_accepts_every_split() {
         let frame = tpkt(&vec![0x42; len - 4]);
         for split in 1..len {
             let mut io = Scripted::pieces([frame[..split].to_vec(), frame[split..].to_vec()]);
-            assert_eq!(read_tpkt(&mut io, 1028).unwrap(), frame);
+            assert_eq!(
+                read_tpkt(&mut io, 1028, Duration::from_secs(1)).unwrap(),
+                frame
+            );
         }
         let mut io = Scripted::pieces(frame.iter().map(|b| vec![*b]));
         io.reads.push_front(Err(io::ErrorKind::Interrupted.into()));
-        assert_eq!(read_tpkt(&mut io, 1028).unwrap(), frame);
+        assert_eq!(
+            read_tpkt(&mut io, 1028, Duration::from_secs(1)).unwrap(),
+            frame
+        );
     }
 }
 
@@ -76,18 +99,23 @@ fn read_tpkt_leaves_next_frame() {
     let a = data_frame(&[0x32; 19]);
     let b = data_frame(&[0x32; 20]);
     let mut io = Cursor::new([a.as_slice(), b.as_slice()].concat());
-    assert_eq!(read_tpkt(&mut io, 487).unwrap(), a);
-    assert_eq!(read_tpkt(&mut io, 487).unwrap(), b);
+    assert_eq!(read_tpkt(&mut io, 487, Duration::from_secs(1)).unwrap(), a);
+    assert_eq!(read_tpkt(&mut io, 487, Duration::from_secs(1)).unwrap(), b);
 }
 
 #[test]
 fn read_tpkt_rejects_invalid_lengths() {
     for len in 0..4 {
-        assert!(read_tpkt(&mut Cursor::new([3, 0, 0, len]), 487).is_err());
+        assert!(read_tpkt(
+            &mut Cursor::new([3, 0, 0, len]),
+            487,
+            Duration::from_secs(1)
+        )
+        .is_err());
     }
     for header in [[2, 0, 0, 10], [3, 1, 0, 10], [3, 0, 2, 0]] {
         let mut io = Cursor::new(header);
-        assert!(read_tpkt(&mut io, 487).is_err());
+        assert!(read_tpkt(&mut io, 487, Duration::from_secs(1)).is_err());
         assert_eq!(io.position(), 4);
     }
 }
@@ -103,7 +131,12 @@ fn read_tpkt_propagates_eof_and_timeout() {
         if kind != io::ErrorKind::UnexpectedEof {
             io.reads.push_back(Err(kind.into()));
         }
-        assert!(matches!(read_tpkt(&mut io, 487), Err(S7Error::Io(e)) if e.kind() == kind));
+        let result = read_tpkt(&mut io, 487, Duration::from_secs(1));
+        if kind == io::ErrorKind::UnexpectedEof {
+            assert!(matches!(result, Err(S7Error::ConnectionClosed)));
+        } else {
+            assert!(matches!(result, Err(S7Error::Io(e)) if e.kind() == kind));
+        }
     }
 }
 
@@ -177,12 +210,20 @@ fn negotiation_rejects_bad_header_or_error() {
         bad[index] ^= 1;
         let mut io = Scripted::pieces([bad]);
         assert!(
-            matches!(negotiate(&mut io), Err(S7Error::PduNegotiationFailed)),
+            matches!(
+                negotiate(&mut io, Duration::from_secs(1)),
+                Err(S7Error::PduNegotiationFailed)
+            ),
             "index {index}"
         );
     }
     let mut io = Scripted::pieces(good.iter().map(|b| vec![*b]));
-    assert_eq!(negotiate(&mut io).unwrap().pdu_length, 480);
+    assert_eq!(
+        negotiate(&mut io, Duration::from_secs(1))
+            .unwrap()
+            .pdu_length,
+        480
+    );
     assert_eq!(io.writes.len(), 25);
     assert_eq!(&io.writes[23..25], &[1, 0xe0]);
 }
@@ -314,7 +355,7 @@ fn requests(io: &Scripted) -> Vec<Vec<u8>> {
     let mut cursor = Cursor::new(&io.writes);
     let mut result = Vec::new();
     while cursor.position() < io.writes.len() as u64 {
-        result.push(read_tpkt(&mut cursor, 487).unwrap());
+        result.push(read_tpkt(&mut cursor, 487, Duration::from_secs(1)).unwrap());
     }
     result
 }
@@ -339,6 +380,7 @@ fn bit_address_does_not_wrap() {
                 transfer(start, true),
                 &mut buffer,
                 &mut chunks,
+                Duration::from_secs(1),
             )
             .unwrap();
             assert_eq!(buffer, [1, 0, 0, 0]);
@@ -349,6 +391,7 @@ fn bit_address_does_not_wrap() {
                 transfer(start, true),
                 &[1, 99],
                 &mut chunks,
+                Duration::from_secs(1),
             )
             .unwrap();
             let packets = requests(&io);
@@ -394,6 +437,7 @@ fn large_transfer_is_complete() {
                         transfer(17, false),
                         &expected,
                         &mut chunks,
+                        Duration::from_secs(1),
                     )
                     .unwrap();
                 } else {
@@ -405,6 +449,7 @@ fn large_transfer_is_complete() {
                         transfer(17, false),
                         &mut buffer,
                         &mut chunks,
+                        Duration::from_secs(1),
                     )
                     .unwrap();
                     assert_eq!(buffer, expected);
@@ -451,7 +496,8 @@ fn empty_bit_buffer_rejected_before_io() {
             &mut reference,
             transfer(0, true),
             &mut [],
-            &mut chunks
+            &mut chunks,
+            Duration::from_secs(1)
         ),
         Err(S7Error::InvalidFunParameter)
     ));
@@ -462,7 +508,8 @@ fn empty_bit_buffer_rejected_before_io() {
             &mut reference,
             transfer(0, true),
             &[],
-            &mut chunks
+            &mut chunks,
+            Duration::from_secs(1)
         ),
         Err(S7Error::InvalidFunParameter)
     ));
@@ -482,6 +529,7 @@ fn byte_empty_is_noop() {
         transfer(0, false),
         &mut [],
         &mut chunks,
+        Duration::from_secs(1),
     )
     .unwrap();
     write_transfer(
@@ -491,6 +539,7 @@ fn byte_empty_is_noop() {
         transfer(0, false),
         &[],
         &mut chunks,
+        Duration::from_secs(1),
     )
     .unwrap();
     assert!(io.writes.is_empty());
@@ -514,7 +563,8 @@ fn address_range_checked_before_io() {
             &mut reference,
             transfer(65535, false),
             &buffer,
-            &mut chunks
+            &mut chunks,
+            Duration::from_secs(1)
         ),
         Err(S7Error::InvalidFunParameter)
     ));
@@ -526,7 +576,8 @@ fn address_range_checked_before_io() {
         &mut reference,
         transfer(65535, false),
         &mut buffer,
-        &mut chunks
+        &mut chunks,
+        Duration::from_secs(1)
     )
     .is_err());
     assert!(io.writes.is_empty());
@@ -547,7 +598,8 @@ fn second_write_chunk_failure_stops_without_retry() {
             &mut reference,
             transfer(0, false),
             &vec![42; 600],
-            &mut chunks
+            &mut chunks,
+            Duration::from_secs(1)
         ),
         Err(S7Error::S7InvalidAddress)
     ));
@@ -570,7 +622,8 @@ fn short_read_leaves_destination_unchanged() {
         &mut reference,
         transfer(0, false),
         &mut buffer,
-        &mut chunks
+        &mut chunks,
+        Duration::from_secs(1)
     )
     .is_err());
     assert_eq!(buffer, [42; 4]);
@@ -614,6 +667,7 @@ fn bit_write_payload_is_normalized() {
             transfer(3, true),
             &input,
             &mut chunks,
+            Duration::from_secs(1),
         )
         .unwrap();
         assert_eq!(
@@ -622,4 +676,28 @@ fn bit_write_payload_is_normalized() {
             "input {input:?}"
         );
     }
+}
+
+#[test]
+fn frame_deadline_bounds_slow_peer() {
+    let frame = data_frame(&[0x32; 20]);
+    let mut io = Scripted::pieces(frame.iter().map(|b| vec![*b]));
+    io.delay = Duration::from_millis(20);
+    let started = Instant::now();
+    let err = read_tpkt(&mut io, 487, Duration::from_millis(100)).unwrap_err();
+    assert!(matches!(err, S7Error::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(!io.reads.is_empty());
+    assert!(io.timeouts.iter().all(|t| *t <= Duration::from_millis(100)));
+    assert!(io.timeouts.windows(2).all(|w| w[1] <= w[0]));
+}
+
+#[test]
+fn huge_read_timeout_does_not_panic() {
+    let frame = data_frame(&[0x32; 20]);
+    let mut io = Scripted::pieces([frame.clone()]);
+    assert_eq!(
+        read_tpkt(&mut io, 487, Duration::from_millis(u64::MAX)).unwrap(),
+        frame
+    );
 }
