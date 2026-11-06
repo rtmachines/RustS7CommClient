@@ -61,7 +61,7 @@ each request and expected response fits in one TPDU. COTP fragmentation is unsup
 
 The client reads complete bounded TCP frames and validates S7 responses against the
 request, including the reference, operation and payload length. It returns an error
-for an incomplete or inconsistent response. Writes across multiple chunks are not
+for an incomplete or inconsistent response. Writes are not
 atomic. For writes, after an error bytes `[0, confirmed)` were acknowledged by the PLC,
 the chunk starting at `confirmed` may or may not have been written (also for a
 single-chunk write or `write_bit`), and later bytes were not sent. The client never

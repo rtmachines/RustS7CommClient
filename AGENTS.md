@@ -6,7 +6,8 @@ Ten plik jest wspólnym źródłem instrukcji projektu; nie twórz kopii w CLAUD
 ## Środowisko i komendy
 
 Uruchamiaj komendy z katalogu zawierającego główny Cargo.toml. Potrzebujesz
-toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i clippy.
+toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i clippy. Uruchomienie testów (dev-dependency proptest) wymaga
+Rust ≥ 1.88; sama biblioteka wymaga tylko edition 2021.
 
 | Cel | Komenda |
 | --- | --- |

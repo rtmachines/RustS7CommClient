@@ -69,7 +69,8 @@ pub struct S7Client {
     /// Reset before validation; includes the failing chunk if an I/O or PLC error occurs.
     pub chunks: usize,
     /// Number of buffer bytes confirmed in the last read/write: copied from verified
-    /// responses (read) or acknowledged by the PLC (write). Reset with `chunks`.
+    /// responses (read) or acknowledged by the PLC (write). Reset with `chunks`;
+    /// `chunks == 0` means no request was sent.
     /// For writes, after an error bytes `[0, confirmed)` were acknowledged, the chunk starting at
     /// `confirmed` may or may not have been written by the PLC, and later bytes were not sent;
     /// for reads, only `[0, confirmed)` of the buffer is a result.
@@ -196,7 +197,7 @@ impl S7Client {
     /// The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
     ///
     /// ### Parameters
-    /// - `port`: TCP Connection port (1..65535)
+    /// - `port`: TCP Connection port (1..=65535)
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `AnyError` on failure.
@@ -306,7 +307,7 @@ impl S7Client {
     /// - `kind::CONNECTION_CLOSED`: the peer closed the connection.
     /// - `kind::ISO_INVALID_HEADER` / `kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
     /// - `kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
-    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a framing error in the reply is the error's `source()`.
+    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a COTP framing error in the Setup Communication reply is the error's `source()`.
     ///
     /// ### Negotiated limits
     /// The S7 offer is at most 480 bytes and fits in one COTP TPDU, including its

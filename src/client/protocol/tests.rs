@@ -146,6 +146,25 @@ fn read_tpkt_propagates_eof_and_timeout() {
 }
 
 #[test]
+fn other_io_errors_are_not_reported_as_timeout() {
+    for io_kind in [
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+    ] {
+        let mut io = Scripted::pieces([vec![3, 0, 0, 22], vec![0; 3]]);
+        io.reads.push_back(Err(io_kind.into()));
+        let result = read_tpkt(&mut io, 487, Duration::from_secs(1));
+        assert_kind(&result, kind::IO);
+        let message = result.unwrap_err().to_string();
+        assert!(!message.contains("no complete response frame"), "{message}");
+        assert!(
+            message.contains(&io::Error::from(io_kind).to_string()),
+            "{message}"
+        );
+    }
+}
+
+#[test]
 fn cotp_headers_are_validated() {
     let frame = data_frame(&[0x32]);
     assert_eq!(data_payload(&frame).unwrap(), &[0x32]);

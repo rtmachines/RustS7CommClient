@@ -37,7 +37,8 @@
 - Causes: walk the chain with `std::error::Error::source()`; `{e}` prints it inline and `{e:#}` on separate lines.
 - Lost information: `io::ErrorKind`, `raw_os_error` and downcasting to `io::Error` are not available after conversion; use `kind::IO` and the message text instead.
 - Serialization: `AnyError` serializes with serde in the format owned by `anyerror` (`typ`, `msg`, `source`, `context`, `backtrace`). A round trip preserves category, context and the cause chain. There is no schema stability promise across `anyerror` versions, and full `Display` text is not stable; only categories and the presence of context fields are.
-- Unchanged: multi-chunk writes are not atomic, writes are never retried automatically, and after an error only `[0, confirmed)` of a read buffer is a result (the chunk starting at `confirmed` of a write may have been applied).
+- Unchanged: multi-chunk (and any) writes are not atomic, and writes are never retried automatically.
+- After an error, use `S7Client::confirmed`: for writes bytes `[0, confirmed)` were acknowledged and the next chunk may or may not have been applied; for reads only `[0, confirmed)` of the buffer is a result.
 
 ## [0.1.2] - 2025-08-15
 

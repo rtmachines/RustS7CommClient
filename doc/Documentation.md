@@ -237,7 +237,7 @@ pub fn set_connection_port(&mut self, port: u16) -> rust7::Result<()>
 The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
 
 #### Parameters
-- `port`: TCP connection port (1..65535)
+- `port`: TCP connection port (1..=65535)
  
 #### Returns
 `Ok(())` on success, or an `AnyError` on failure.
@@ -324,7 +324,7 @@ changed it via `set_connection_port()`
 - `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection.
 - `rust7::kind::ISO_INVALID_HEADER` / `rust7::kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
 - `rust7::kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
-- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a framing error in the reply is the error's `source()`.
+- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a COTP framing error in the Setup Communication reply is the error's `source()`.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -465,6 +465,7 @@ This helper method is same as `read_area()` with:
 
 #### Notes
 - The number of bytes to read will be equal to the size of the buffer passed.
+- On error only `[0, confirmed)` of the buffer is a result.
  
 For further info, please refer to `read_area()`
 
@@ -593,7 +594,7 @@ Maybe you need to know it only for extreme tuning
 pub confirmed: usize
 ```
 #### Buffer bytes confirmed in the last read or write
-Copied from verified responses (read) or acknowledged by the PLC (write). Reset together with `chunks`.
+Copied from verified responses (read) or acknowledged by the PLC (write). Reset together with `chunks`. `chunks == 0` means no request was sent.
 #### Note
 - For writes, after an error bytes `[0, confirmed)` were acknowledged, the chunk starting at `confirmed` may or may not have been written by the PLC (also for a single-chunk write or `write_bit`), and later bytes were not sent; for reads, only `[0, confirmed)` of the buffer is a result.
 

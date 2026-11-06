@@ -9,4 +9,4 @@ The examples report errors with `eprintln!("...: {e:#}")`. The plain format `{e}
 
 The Docker example (`examples/docker`) is a separate package that depends on the published `rust7 = "0.2"` from the registry. Until 0.2 is published, building it does not test the current checkout of this library.
 
-Build the SDK example with `cargo build --offline --example sdk_client`. Run it only against a device you have explicitly chosen; it connects to a real PLC.
+Build the SDK example with `cargo build --example sdk_client`. Run it only against a device you have explicitly chosen; it connects to a real PLC.
