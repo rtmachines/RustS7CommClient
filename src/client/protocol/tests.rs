@@ -1030,8 +1030,8 @@ mod properties {
 
     fn read_item() -> impl Strategy<Value = Vec<u8>> {
         (
-            prop_oneof![Just(0xffu8), any::<u8>()],
-            prop_oneof![Just(3u8), Just(4u8), any::<u8>()],
+            prop_oneof![4 => Just(0xffu8), 1 => any::<u8>()],
+            prop_oneof![4 => Just(4u8), 2 => Just(3u8), 1 => any::<u8>()],
             vec(any::<u8>(), 0..=40),
             prop_oneof![
                 Just(None),
@@ -1047,17 +1047,26 @@ mod properties {
             })
     }
 
+    fn short_item() -> impl Strategy<Value = Vec<u8>> {
+        vec(any::<u8>(), 0..=3).prop_map(|rest| [&[0xff][..], &rest].concat())
+    }
+
     fn coherent_ack() -> impl Strategy<Value = Vec<u8>> {
         (
-            prop_oneof![Just(2u8), Just(3u8), any::<u8>()],
-            prop_oneof![Just(1u16), any::<u16>()],
-            prop_oneof![Just([0u8, 0]), any::<[u8; 2]>()],
+            prop_oneof![6 => Just(3u8), 1 => Just(2u8), 1 => any::<u8>()],
+            prop_oneof![6 => Just(1u16), 1 => any::<u16>()],
+            prop_oneof![6 => Just([0u8, 0]), 1 => any::<[u8; 2]>()],
             prop_oneof![
-                Just(vec![4u8, 1]),
-                Just(vec![5u8, 1]),
-                vec(any::<u8>(), 0..=4)
+                3 => Just(vec![4u8, 1]),
+                2 => Just(vec![5u8, 1]),
+                1 => vec(any::<u8>(), 0..=4)
             ],
-            prop_oneof![read_item(), vec(any::<u8>(), 0..=40)],
+            prop_oneof![
+                4 => read_item(),
+                2 => short_item(),
+                1 => Just(Vec::new()),
+                1 => vec(any::<u8>(), 0..=40)
+            ],
         )
             .prop_map(|(rosctr, reference, error, params, data)| {
                 let mut pdu = vec![0x32, rosctr, 0, 0];
