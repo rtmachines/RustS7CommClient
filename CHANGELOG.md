@@ -15,6 +15,7 @@
 - The client disconnects itself after transport or framing errors (`kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM`, `kind::ISO_FRAGMENTED_PACKET`); PLC errors keep the connection
 
 ### Added
+- Minimum supported Rust version declared: `rust-version = "1.99"`
 - `S7Client::confirmed` reports the buffer bytes confirmed in the last read or write; after a write error the chunk starting there may have been applied
 - Errors implement `std::error::Error` (via `AnyError`)
 - Public module `rust7::error` with `kind`, `Result` and `AnyError`, also re-exported at the crate root
