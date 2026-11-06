@@ -374,13 +374,20 @@ fn valid_area(area: u8) -> Result<()> {
     Ok(())
 }
 
+/// Transfer counters shared with the caller so they survive an error.
+#[derive(Default)]
+pub(super) struct Progress {
+    pub(super) chunks: usize,
+    pub(super) confirmed: usize,
+}
+
 pub(super) fn read_transfer<T: FrameRead + Write>(
     io: &mut T,
     limits: &PduLimits,
     reference: &mut u16,
     transfer: Transfer,
     buffer: &mut [u8],
-    chunks: &mut usize,
+    progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
     valid_area(transfer.area)?;
@@ -390,13 +397,14 @@ pub(super) fn read_transfer<T: FrameRead + Write>(
         let count = (len - offset).min(limits.read_payload);
         let reference = next_reference(reference);
         let req = request(&transfer, offset, count, reference, None);
-        *chunks += 1;
+        progress.chunks += 1;
         io.write_all(&req).map_err(error::io)?;
         let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         let data =
             validate_read_response(data_payload(&frame)?, reference, transfer.wordlen, count)?;
         buffer[offset..offset + count].copy_from_slice(data);
         offset += count;
+        progress.confirmed = offset;
     }
     Ok(())
 }
@@ -407,7 +415,7 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
     reference: &mut u16,
     transfer: Transfer,
     buffer: &[u8],
-    chunks: &mut usize,
+    progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
     valid_area(transfer.area)?;
@@ -424,11 +432,12 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
             &buffer[offset..offset + count]
         };
         let req = request(&transfer, offset, count, reference, Some(payload));
-        *chunks += 1;
+        progress.chunks += 1;
         io.write_all(&req).map_err(error::io)?;
         let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         validate_write_response(data_payload(&frame)?, reference)?;
         offset += count;
+        progress.confirmed = offset;
     }
     Ok(())
 }

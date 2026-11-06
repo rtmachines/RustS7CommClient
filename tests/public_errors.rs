@@ -21,6 +21,12 @@ fn public_methods_return_anyerror() {
 }
 
 #[test]
+fn progress_fields_are_public() {
+    let c = S7Client::new();
+    let _: (usize, usize) = (c.chunks, c.confirmed);
+}
+
+#[test]
 fn public_errors_are_send_sync() {
     fn bound<E: std::error::Error + Send + Sync + 'static>() {}
     bound::<rust7::AnyError>();

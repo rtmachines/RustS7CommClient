@@ -62,14 +62,18 @@ each request and expected response fits in one TPDU. COTP fragmentation is unsup
 The client reads complete bounded TCP frames and validates S7 responses against the
 request, including the reference, operation and payload length. It returns an error
 for an incomplete or inconsistent response. Writes across multiple chunks are not
-atomic: an error can occur after earlier chunks have reached the PLC. The client does
-not automatically retry writes. Discard a read buffer after an error. After a low-level
+atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC; the chunk
+starting at `confirmed` may or may not have been written, also for a single-chunk write
+or `write_bit`; later bytes were not sent. The client never retries a write. After a read
+error only `[0, confirmed)` of the buffer is a result. After a low-level
 communication error the client disconnects itself; reconnect before the next operation.
 A valid terminal S7 `ACK` carrying a PLC error returns `kind::S7_UNSPECIFIED` and keeps
 the session usable. An empty or malformed `ACK` disconnects the client.
 
 `pdu_length` is diagnostic; changing it does not override the internal negotiated
-limits. `chunks` counts attempted read/write chunks, including a failing chunk.
+limits. `chunks` counts attempted read/write chunks, including a failing chunk; `confirmed` counts
+buffer bytes confirmed in the last read/write (copied from verified responses or acknowledged
+by the PLC), reset together with `chunks`.
 
 ## Errors
 

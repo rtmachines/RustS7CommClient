@@ -381,7 +381,7 @@ After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::
 #### Notes
 - The number of bytes to read will be equal to the size of the buffer passed.
 - Large blocks are automatically split into chunks based on the negotiated PDU size.
-- In case of error the buffer contents will be inconsistent and should not be considered.
+- In case of error only `[0, confirmed)` of the buffer is a result.
  
 ---
 ```rust
@@ -436,6 +436,7 @@ After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::
 
 #### Notes
 - The number of bytes to write will be equal to the size of the buffer passed.
+- Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC; the chunk starting at `confirmed` may or may not have been written, also for a single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
 - Large blocks are automatically split into chunks based on the negotiated PDU size.
 - Writing the output buffer (`S7_AREA_PA`) usually does not produce useful results, in fact the output process image will be rewritten by OB1 in the next round
 
@@ -479,6 +480,7 @@ This helper method is same as `write_area()` with:
 
 #### Notes
 - The number of bytes to write will be equal to the size of the buffer passed.
+- Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC; the chunk starting at `confirmed` may or may not have been written, also for a single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
  
 For further info, please refer to `write_area()`
 
@@ -580,6 +582,15 @@ Maybe you need to know it only for extreme tuning
 #### Note
 - Reset at the start of each read/write; on error it includes chunks already attempted, including the failing chunk.
 
+---
+```rust
+pub confirmed: usize
+```
+#### Buffer bytes confirmed in the last read or write
+Copied from verified responses (read) or acknowledged by the PLC (write). Reset together with `chunks`.
+#### Note
+- After an error, bytes `[0, confirmed)` are confirmed; the chunk starting at `confirmed` may or may not have been written by the PLC (also for a single-chunk write or `write_bit`); later bytes were not sent.
+
 
 ## Transfer validation and limits
 
@@ -623,8 +634,10 @@ usable. An `ACK` without an error or with extra parameters/data is a
 `kind::ISO_INVALID_TELEGRAM` error and disconnects the client. It never confirms a successful
 write. Successful reads and writes still require a validated `ACK_DATA` response.
 
-A multichunk write is not atomic: earlier chunks may have reached the PLC when a
-later chunk fails. No write is automatically retried. After a read error discard
-the destination buffer, since earlier chunks may have been copied. After a low-level
+A write is not atomic: after an error, bytes `[0, confirmed)` were acknowledged by the
+PLC, the chunk starting at `confirmed` may or may not have been written (also for a
+single-chunk write or `write_bit`), and later bytes were not sent. No write is
+automatically retried. After a read error only `[0, confirmed)` of the destination
+buffer is a result. After a low-level
 communication error the client disconnects itself; reconnect before the next operation. `chunks` records attempted chunks, including the
 failing attempt; parameter validation failures leave it zero.

@@ -53,7 +53,8 @@ rename i sprawdź wynikowy diff.
   Zmiany protokołu sprawdzaj wraz z testami w src/client/tests.rs,
   src/client/protocol/tests.rs i tests/tcp_smoke.rs.
 - Wieloczęściowy zapis nie jest atomowy: wcześniejsze części mogą dotrzeć do PLC
-  przed błędem. Nie dodawaj automatycznych ponowień zapisów bez rozstrzygnięcia
+  przed błędem, a także część, przy której wystąpił błąd; potwierdzone bajty to
+  `[0, confirmed)`. Nie dodawaj automatycznych ponowień zapisów bez rozstrzygnięcia
   ich semantyki. Po błędzie odczytu bufor nie jest kompletnym wynikiem.
 - Nie uruchamiaj przykładów przeciw rzeczywistemu PLC bez wyraźnego zlecenia
   i wskazania urządzenia; do testów transportu używaj lokalnego mocka.

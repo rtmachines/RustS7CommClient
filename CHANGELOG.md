@@ -15,6 +15,7 @@
 - The client disconnects itself after transport or framing errors (`kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM`, `kind::ISO_FRAGMENTED_PACKET`); PLC errors keep the connection
 
 ### Added
+- `S7Client::confirmed` reports the buffer bytes confirmed in the last read or write; after a write error the chunk starting there may have been applied
 - Errors implement `std::error::Error` (via `AnyError`)
 - Public module `rust7::error` with `kind`, `Result` and `AnyError`, also re-exported at the crate root
 
@@ -34,7 +35,7 @@
 - Causes: walk the chain with `std::error::Error::source()`; `{e}` prints it inline and `{e:#}` on separate lines.
 - Lost information: `io::ErrorKind`, `raw_os_error` and downcasting to `io::Error` are not available after conversion; use `kind::IO` and the message text instead.
 - Serialization: `AnyError` serializes with serde in the format owned by `anyerror` (`typ`, `msg`, `source`, `context`, `backtrace`). A round trip preserves category, context and the cause chain. There is no schema stability promise across `anyerror` versions, and full `Display` text is not stable; only categories and the presence of context fields are.
-- Unchanged: multi-chunk writes are not atomic, writes are never retried automatically, and a read buffer must be discarded after an error.
+- Unchanged: multi-chunk writes are not atomic, writes are never retried automatically, and after an error only `[0, confirmed)` of a read buffer is a result (the chunk starting at `confirmed` of a write may have been applied).
 
 ## [0.1.2] - 2025-08-15
 

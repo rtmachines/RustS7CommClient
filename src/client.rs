@@ -68,6 +68,11 @@ pub struct S7Client {
     /// Number of read/write chunks attempted in the last operation.
     /// Reset before validation; includes the failing chunk if an I/O or PLC error occurs.
     pub chunks: usize,
+    /// Number of buffer bytes confirmed in the last read/write: copied from verified
+    /// responses (read) or acknowledged by the PLC (write). Reset with `chunks`.
+    /// After an error, bytes `[0, confirmed)` are confirmed; the chunk starting at
+    /// `confirmed` may or may not have been written by the PLC; later bytes were not sent.
+    pub confirmed: usize,
 }
 
 impl S7Client {
@@ -92,6 +97,7 @@ impl S7Client {
             connected: false,
             last_time: 0.0,
             chunks: 0,
+            confirmed: 0,
         }
     }
 
@@ -462,7 +468,7 @@ impl S7Client {
     ///   An invalid range is rejected before sending any request.
     /// - Bit operations require a nonempty buffer and use only its first byte.
     /// - Empty byte buffers send no telegram after parameter and connection checks.
-    /// - On error, earlier chunks may already be copied; discard the buffer.
+    /// - On error only `[0, confirmed)` of the buffer is a result.
     /// - Each response is checked against the request and expected payload length.
     ///
     pub fn read_area(
@@ -492,6 +498,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         self.check_area(area)?;
         protocol::validate_transfer(start, wordlen, buffer.len())?;
         if !self.connected {
@@ -500,6 +507,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
         let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
         let time = Instant::now();
+        let mut progress = protocol::Progress::default();
         let result = protocol::read_transfer(
             stream,
             limits,
@@ -511,9 +519,11 @@ impl S7Client {
                 wordlen,
             },
             buffer,
-            &mut self.chunks,
+            &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
         );
+        self.chunks = progress.chunks;
+        self.confirmed = progress.confirmed;
         self.finish(result, time)
     }
 
@@ -568,8 +578,9 @@ impl S7Client {
     ///
     /// ### Notes
     /// - A successful byte write transfers the entire buffer.
-    /// - Writes are not atomic across chunks. On error, earlier chunks may already be written.
-    ///   The client never automatically retries a write.
+    /// - Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC;
+    ///   the chunk starting at `confirmed` may or may not have been written, also for a
+    ///   single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
     /// - Large blocks, including buffers larger than 65535 bytes, are split into chunks.
     /// - A byte transfer must fit in the 24-bit bit address (last byte at most 0x1fffff).
     ///   An invalid range is rejected before sending any request.
@@ -605,6 +616,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         self.check_area(area)?;
         protocol::validate_transfer(start, wordlen, buffer.len())?;
         if !self.connected {
@@ -613,6 +625,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
         let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
         let time = Instant::now();
+        let mut progress = protocol::Progress::default();
         let result = protocol::write_transfer(
             stream,
             limits,
@@ -624,9 +637,11 @@ impl S7Client {
                 wordlen,
             },
             buffer,
-            &mut self.chunks,
+            &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
         );
+        self.chunks = progress.chunks;
+        self.confirmed = progress.confirmed;
         self.finish(result, time)
     }
 
@@ -660,6 +675,7 @@ impl S7Client {
     ///
     /// ### Notes
     /// - The number of bytes to read will be equal to the size of the buffer passed.
+    /// - On error only `[0, confirmed)` of the buffer is a result.
     /// ---
     /// For further info, please refer to `read_area()`
     ///
@@ -725,6 +741,7 @@ impl S7Client {
     ) -> Result<bool> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         let start = protocol::bit_start(byte_num, bit_idx)?;
         let mut buffer = [0u8; 1];
         self.read_area_impl(area, db_number, start, S7_WL_BIT, &mut buffer)?;
@@ -745,8 +762,9 @@ impl S7Client {
     ///
     /// ### Notes
     /// - A successful byte write transfers the entire buffer.
-    /// - Writes are not atomic across chunks. On error, earlier chunks may already be written.
-    ///   The client never automatically retries a write.
+    /// - Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC;
+    ///   the chunk starting at `confirmed` may or may not have been written, also for a
+    ///   single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
     /// ---
     /// For further info, please refer to `write_area()`
     ///
@@ -782,6 +800,8 @@ impl S7Client {
     ///
     /// ### Notes
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
+    /// Writes are not atomic. After an error, the single-byte request may or may not have been
+    /// applied by the PLC (`confirmed` is 0 unless it was acknowledged). The client never retries a write.
     /// ---
     /// For further info, please refer to `write_area()`
     ///
@@ -811,6 +831,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         let start = protocol::bit_start(byte_num, bit_idx)?;
         self.write_area_impl(area, db_number, start, S7_WL_BIT, &[u8::from(value)])
     }

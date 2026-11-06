@@ -277,6 +277,7 @@ fn run(scenario: Scenario) {
             };
             assert_eq!(buffer, [0xaa; 600]);
             assert_eq!(client.chunks, 1);
+            assert_eq!(client.confirmed, 0);
             assert_eq!(client.last_time, 0.0);
             if matches!(scenario, Scenario::MalformedAck(_)) {
                 assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
@@ -307,6 +308,7 @@ fn run(scenario: Scenario) {
                 "{message}"
             );
             assert_eq!(client.chunks, 1);
+            assert_eq!(client.confirmed, 0);
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut buffer), kind::NOT_CONNECTED);
@@ -352,9 +354,12 @@ fn run(scenario: Scenario) {
                 (0..65536).map(|i| (i % 251) as u8).collect::<Vec<_>>()
             );
             assert!(client.chunks > 1);
+            assert_eq!(client.confirmed, 65536);
             client.write_db(100, 0, &read).unwrap();
             assert!(client.chunks > 1);
+            assert_eq!(client.confirmed, 65536);
             assert!(client.read_bit(S7_AREA_DB, 100, 65535, 7).unwrap());
+            assert_eq!(client.confirmed, 1);
             client.write_bit(S7_AREA_DB, 100, 65535, 7, true).unwrap();
         }
         client.disconnect();
