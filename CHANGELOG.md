@@ -20,6 +20,7 @@
 - Public module `rust7::error` with `kind`, `Result` and `AnyError`, also re-exported at the crate root
 
 ### Fixed
+- Documentation and comments match the code: connection type constants, `set_connection_port` and `write_area` parameters, error lists, timeout and `CONNECTION_CLOSED` descriptions, the reconnect loop, the `confirmed` and `write_bit` wording and Connection Request byte labels
 - The SDK example builds as `sdk_client` and is checked by `cargo check --all-targets`; `examples/docker` is no longer compiled as an example of the `rust7` package
 - Respect the COTP TPDU size selected in Connection Confirm when offering an S7 PDU and splitting transfers; reject malformed or duplicate size options and S7 sizes exceeding the offer
 - Treat a matching, header-only S7 error `ACK` as `kind::S7_UNSPECIFIED` without disconnecting; reject empty or malformed `ACK` responses without acknowledging or retrying writes

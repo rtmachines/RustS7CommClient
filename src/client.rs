@@ -70,8 +70,9 @@ pub struct S7Client {
     pub chunks: usize,
     /// Number of buffer bytes confirmed in the last read/write: copied from verified
     /// responses (read) or acknowledged by the PLC (write). Reset with `chunks`.
-    /// After an error, bytes `[0, confirmed)` are confirmed; the chunk starting at
-    /// `confirmed` may or may not have been written by the PLC; later bytes were not sent.
+    /// For writes, after an error bytes `[0, confirmed)` were acknowledged, the chunk starting at
+    /// `confirmed` may or may not have been written by the PLC, and later bytes were not sent;
+    /// for reads, only `[0, confirmed)` of the buffer is a result.
     pub confirmed: usize,
 }
 
@@ -118,14 +119,14 @@ impl S7Client {
     /// - `CT_OP`: (as an HMI)
     /// - `CT_S7`: (as a generic device)
     ///
-    /// In practice, there aren't many differences; the S7_PG connection should ensure
+    /// In practice, there aren't many differences; the `CT_PG` connection should ensure
     /// better system responsiveness, but in reality, I've never noticed any noticeable differences.
     ///
     /// `CT_PG` is used by default.
     ///
     /// With very old PLCs (early S7300 series) that have limited communication resources,
     /// the connection may be rejected if we have S7Manager with many online windows open at the same time.
-    /// In this case, use `S7_OP` or `S7_BASIC`.
+    /// In this case, use `CT_OP` or `CT_S7`.
     ///
     /// ### Parameters
     /// - `connection_type`: Connection type.
@@ -156,7 +157,8 @@ impl S7Client {
     /// ### Parameters
     /// - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
     /// - `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
-    /// - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
+    /// - `wr_timeout_ms` : Socket send timeout for each request (ms) (Default = 500 ms);
+    ///   the PLC acknowledgement of a write is bounded by `rd_timeout_ms`
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `AnyError` on failure.
@@ -300,7 +302,7 @@ impl S7Client {
     ///
     /// ### Errors
     /// - `kind::TCP_CONNECTION_FAILED`: the address resolves to no socket address.
-    /// - `kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+    /// - `kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error; a reply not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
     /// - `kind::CONNECTION_CLOSED`: the peer closed the connection.
     /// - `kind::ISO_INVALID_HEADER` / `kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
     /// - `kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
@@ -358,16 +360,16 @@ impl S7Client {
             hi_part!(ISO_CR_LEN), // High part of packet lenght (entire frame, payload and TPDU included)
             lo_part!(ISO_CR_LEN), // Low part of packet lenght (entire frame, payload and TPDU included)
             // COTP (ISO 8073 Header)
-            0x11,                  // PDU Size Length
+            0x11,                  // COTP header length (LI = 17)
             ISO_CONN_REQ,          // CR - Connection Request ID
             0x00,                  // Dst Reference HI
             0x00,                  // Dst Reference LO
             0x00,                  // Src Reference HI
             0x01,                  // Src Reference LO
             0x00,                  // Class + Options Flags
-            0xC0,                  // PDU Max Length ID
-            0x01,                  // PDU Max Length HI
-            0x0A,                  // PDU Max Length LO
+            0xC0,                  // TPDU size parameter
+            0x01,                  // Parameter length
+            0x0A,                  // TPDU size exponent (2^10 = 1024)
             0xC1,                  // Src TSAP Identifier
             0x02,                  // Src TSAP Length (2 bytes)
             hi_part!(local_tsap),  // Loc TSAP HI
@@ -446,7 +448,7 @@ impl S7Client {
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
     /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
-    /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
+    /// - `kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
     ///
     /// #### Connection after errors
     /// After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or
@@ -561,7 +563,7 @@ impl S7Client {
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
     /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
-    /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
+    /// - `kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
     ///
     /// #### Connection after errors
     /// After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or
@@ -800,8 +802,8 @@ impl S7Client {
     ///
     /// ### Notes
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
-    /// Writes are not atomic. After an error, the single-byte request may or may not have been
-    /// applied by the PLC (`confirmed` is 0 unless it was acknowledged). The client never retries a write.
+    /// After an error `confirmed` is 0 and the request may or may not have been applied by the PLC.
+    /// The client never retries a write.
     /// ---
     /// For further info, please refer to `write_area()`
     ///

@@ -45,7 +45,7 @@ pub mod kind {
     pub const NOT_CONNECTED: &str = "rust7::NotConnected";
     /// The address resolves to no socket address. Raised while connecting; a failed connect leaves the client disconnected (any previous session was already closed).
     pub const TCP_CONNECTION_FAILED: &str = "rust7::TcpConnectionFailed";
-    /// The peer closed the TCP connection. Breaks the session.
+    /// The peer closed the TCP connection (end of stream while reading); a connection reset is reported as [`IO`]. Breaks the session.
     pub const CONNECTION_CLOSED: &str = "rust7::ConnectionClosed";
     /// ISO-on-TCP connection request was rejected or malformed. Raised while connecting; a failed connect leaves the client disconnected (any previous session was already closed).
     pub const ISO_CONNECTION_FAILED: &str = "rust7::IsoConnectionFailed";
