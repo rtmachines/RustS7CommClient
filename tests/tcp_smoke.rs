@@ -72,7 +72,7 @@ enum Scenario {
     SmallTpdu(u8),
     OversizedPdu(u8),
     BadCotp,
-    LateReply,
+    LateReply(bool),
     PlcError,
     AckError(bool),
     MalformedAck(bool),
@@ -184,13 +184,16 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             send_split(&mut stream, &response)?;
             continue;
         }
-        if scenario == Scenario::LateReply {
+        if matches!(scenario, Scenario::LateReply(_)) {
             // Reply after the client's read timeout; the client is gone by then.
+            let data: &[u8] = if request[17] == 5 {
+                assert_eq!(&request[35..], &[1, 2, 3, 4]);
+                &[0xff]
+            } else {
+                &[0xff, 4, 0, 32, 0, 0, 0, 0]
+            };
             thread::sleep(Duration::from_millis(400));
-            let _ = send_split(
-                &mut stream,
-                &reply(&request[11..13], 4, &[0xff, 4, 0, 32, 0, 0, 0, 0]),
-            );
+            let _ = send_split(&mut stream, &reply(&request[11..13], request[17], data));
             return Ok(());
         }
         let data = match (request[17], request[22]) {
@@ -248,7 +251,7 @@ fn run(scenario: Scenario) {
         let mut client = S7Client::new();
         client.set_connection_port(port).unwrap();
         client.set_timeout(1000, 1000, 1000).unwrap();
-        if scenario == Scenario::LateReply {
+        if matches!(scenario, Scenario::LateReply(_)) {
             client.set_timeout(1000, 200, 1000).unwrap();
         }
         let result = client.connect_s71200_1500("127.0.0.1");
@@ -289,14 +292,21 @@ fn run(scenario: Scenario) {
                 assert_eq!(next, [10, 11, 12, 13]);
                 client.write_db(100, 0, &next).unwrap();
             }
-        } else if scenario == Scenario::LateReply {
+        } else if let Scenario::LateReply(writing) = scenario {
             result.unwrap();
             let mut buffer = [0; 4];
-            let result = client.read_db(100, 0, &mut buffer);
+            let result = if writing {
+                client.write_db(100, 0, &[1, 2, 3, 4])
+            } else {
+                client.read_db(100, 0, &mut buffer)
+            };
             assert_kind(&result, kind::IO);
             let message = result.unwrap_err().to_string();
-            let detail = message.strip_prefix(&format!("{}: ", kind::IO));
-            assert!(detail.is_some_and(|d| !d.is_empty()), "{message}");
+            assert!(
+                message.contains("no complete response frame within 200 ms"),
+                "{message}"
+            );
+            assert_eq!(client.chunks, 1);
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut buffer), kind::NOT_CONNECTED);
@@ -367,7 +377,9 @@ fn failed_negotiation_keeps_client_disconnected() {
 #[test]
 #[ignore = "requires permission to open loopback sockets"]
 fn late_reply_disconnects_client() {
-    run(Scenario::LateReply);
+    for writing in [false, true] {
+        run(Scenario::LateReply(writing));
+    }
 }
 
 #[test]

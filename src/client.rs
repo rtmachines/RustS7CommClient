@@ -439,7 +439,7 @@ impl S7Client {
     /// - `kind::ISO_INVALID_HEADER`: Invalid ISO Header
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-    /// - `kind::IO`: network I/O error, including a response not received within the read timeout.
+    /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
     /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
     ///
     /// #### Connection after errors
@@ -550,7 +550,7 @@ impl S7Client {
     /// - `kind::ISO_INVALID_HEADER`: Invalid ISO Header
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-    /// - `kind::IO`: network I/O error, including a response not received within the read timeout.
+    /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
     /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
     ///
     /// #### Connection after errors

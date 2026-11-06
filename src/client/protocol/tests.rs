@@ -137,10 +137,10 @@ fn read_tpkt_propagates_eof_and_timeout() {
             assert_kind(&result, kind::CONNECTION_CLOSED);
         } else {
             assert_kind(&result, kind::IO);
-            let err = result.unwrap_err();
-            assert!(err
-                .to_string()
-                .contains(&io::Error::from(io_kind).to_string()));
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "rust7::Io: no complete response frame within 1000 ms"
+            );
         }
     }
 }
@@ -967,7 +967,7 @@ fn frame_deadline_bounds_slow_peer() {
     assert_eq!(err.get_type(), Some(kind::IO));
     assert!(err
         .to_string()
-        .contains(&io::Error::from(io::ErrorKind::TimedOut).to_string()));
+        .contains("no complete response frame within 100 ms"));
     assert!(started.elapsed() < Duration::from_millis(400));
     assert!(!io.reads.is_empty());
     assert!(io.timeouts.iter().all(|t| *t <= Duration::from_millis(100)));
@@ -980,6 +980,27 @@ fn huge_read_timeout_does_not_panic() {
     let mut io = Scripted::pieces([frame.clone()]);
     assert_eq!(
         read_tpkt(&mut io, 487, Duration::from_millis(u64::MAX)).unwrap(),
+        frame
+    );
+}
+
+#[test]
+fn huge_timeout_with_wouldblock_reports_unified_message() {
+    let mut io = Scripted::pieces([vec![3, 0, 0, 22]]);
+    io.reads.push_back(Err(io::ErrorKind::WouldBlock.into()));
+    let err = read_tpkt(&mut io, 487, Duration::from_millis(u64::MAX)).unwrap_err();
+    assert_eq!(err.get_type(), Some(kind::IO));
+    assert!(err.to_string().contains("within 18446744073709551615 ms"));
+}
+
+#[test]
+fn interrupted_read_is_retried() {
+    let frame = data_frame(&[0x32; 20]);
+    let mut io = Scripted::pieces([]);
+    io.reads.push_back(Err(io::ErrorKind::Interrupted.into()));
+    io.reads.push_back(Ok(frame.clone()));
+    assert_eq!(
+        read_tpkt(&mut io, 487, Duration::from_secs(1)).unwrap(),
         frame
     );
 }

@@ -1,4 +1,4 @@
-use crate::error::{self, Result};
+use crate::error::{self, AnyError, Result};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -97,17 +97,35 @@ fn read_full<R: FrameRead>(
             None => timeout,
         };
         if limit.is_zero() {
-            return Err(error::io(io::ErrorKind::TimedOut.into()));
+            return Err(timed_out(timeout));
         }
         reader.limit_next_read(limit).map_err(error::io)?;
         match reader.read(&mut buf[filled..]) {
             Ok(0) => return Err(error::connection_closed()),
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(timed_out(timeout));
+            }
             Err(e) => return Err(error::io(e)),
         }
     }
     Ok(())
+}
+
+fn timed_out(timeout: Duration) -> AnyError {
+    error::io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "no complete response frame within {} ms",
+            timeout.as_millis()
+        ),
+    ))
 }
 
 fn valid_tpkt(frame: &[u8]) -> bool {

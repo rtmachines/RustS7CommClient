@@ -365,7 +365,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
 - `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
 - `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
+- `rust7::kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
 - `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
 
 ##### Connection after errors
@@ -421,7 +421,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
 - `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
 - `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
+- `rust7::kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
 - `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
 
 ##### Connection after errors

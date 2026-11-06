@@ -10,6 +10,7 @@
 - Every public method adds one context with the method name and its parameters (never buffer contents), e.g. `rust7::NotConnected: Not connected while: read_db db=7 start=3 len=4`; `{e:#}` prints context and `source:` causes on separate lines
 - New dependency: `anyerror` 0.1.13 (pulls in `serde`); `serde_json` is a dev-dependency only. `#![forbid(unsafe_code)]` still applies to the code of `rust7` itself
 - Read timeout bounds a whole response frame; a peer closing the socket yields `kind::CONNECTION_CLOSED` instead of an I/O `UnexpectedEof`
+- A read timeout always reports `no complete response frame within <N> ms` (`kind::IO`), whether the socket or the frame deadline expired
 - The client disconnects itself after transport or framing errors (`kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM`, `kind::ISO_FRAGMENTED_PACKET`); PLC errors keep the connection
 
 ### Added
