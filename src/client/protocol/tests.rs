@@ -412,15 +412,23 @@ fn error_ack(reference: u16) -> Vec<u8> {
 #[test]
 fn terminal_error_ack_reports_plc_error() {
     for error in [[0x81, 4], [0x81, 0], [0, 4]] {
-        let mut pdu = error_ack(0x1234);
-        pdu[10..12].copy_from_slice(&error);
         let expected = format!("(error class {:#04x}, code {:#04x})", error[0], error[1]);
-        let read = validate_read_response(&pdu, 0x1234, 2, 4);
-        let write = validate_write_response(&pdu, 0x1234);
-        assert_kind(&read, kind::S7_UNSPECIFIED);
-        assert_kind(&write, kind::S7_UNSPECIFIED);
-        assert!(read.unwrap_err().to_string().contains(&expected));
-        assert!(write.unwrap_err().to_string().contains(&expected));
+        // A header-only ACK (ROSCTR 2) and a full ACK_DATA (ROSCTR 3) carry the same fields.
+        let header_only = error_ack(0x1234);
+        let read_data = ack(0x1234, 4, &[0xff, 4, 0, 32, 1, 2, 3, 4]);
+        let write_data = ack(0x1234, 5, &[0xff]);
+        for (mut read_pdu, mut write_pdu) in
+            [(header_only.clone(), header_only), (read_data, write_data)]
+        {
+            read_pdu[10..12].copy_from_slice(&error);
+            write_pdu[10..12].copy_from_slice(&error);
+            let read = validate_read_response(&read_pdu, 0x1234, 2, 4);
+            let write = validate_write_response(&write_pdu, 0x1234);
+            assert_kind(&read, kind::S7_UNSPECIFIED);
+            assert_kind(&write, kind::S7_UNSPECIFIED);
+            assert!(read.unwrap_err().to_string().contains(&expected));
+            assert!(write.unwrap_err().to_string().contains(&expected));
+        }
     }
 }
 
@@ -1243,12 +1251,33 @@ mod properties {
             let limits = PduLimits::new(480).unwrap();
             let mut io = Scripted::pieces([data_frame(&pdu)]);
             let mut reference = 0;
-    let mut progress = Progress::default();
+            let mut progress = Progress::default();
             let mut buffer = vec![0xaa; n];
-            if read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
-                &mut buffer, &mut progress, Duration::from_secs(1)).is_err() {
+            let result = read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
+                &mut buffer, &mut progress, Duration::from_secs(1));
+            // n fits one chunk, so the response is a single frame whose payload ends the PDU.
+            prop_assert_eq!(progress.chunks, 1);
+            if result.is_ok() {
+                prop_assert_eq!(&buffer[..], &pdu[pdu.len() - n..]);
+                prop_assert_eq!(progress.confirmed, n);
+            } else {
                 prop_assert!(buffer.iter().all(|b| *b == 0xaa));
+                prop_assert_eq!(progress.confirmed, 0);
             }
+        }
+
+        #[test]
+        fn read_transfer_copies_valid_payload_and_confirms_it(payload in vec(any::<u8>(), 1..=462)) {
+            let limits = PduLimits::new(480).unwrap();
+            let n = payload.len();
+            let mut io = Scripted::pieces([data_frame(&read_ack(1, &payload, false))]);
+            let mut reference = 0;
+            let mut progress = Progress::default();
+            let mut buffer = vec![0xaa; n];
+            read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
+                &mut buffer, &mut progress, Duration::from_secs(1)).unwrap();
+            prop_assert_eq!(&buffer, &payload);
+            prop_assert_eq!((progress.chunks, progress.confirmed), (1, n));
         }
 
         #[test]

@@ -134,7 +134,7 @@ separate lines; the chain is also available through `std::error::Error::source()
 chain; the schema is not guaranteed across `anyerror` versions. After conversion to `AnyError`, `io::ErrorKind`,
 `raw_os_error` and downcasting to `io::Error` are not available.
 
-Errors never imply a retry: multi-chunk writes are not atomic and writes are not retried automatically.
+Errors never imply a retry: writes are not atomic (also a single-chunk write or `write_bit`) and are not retried automatically.
 
 # API
 ---
