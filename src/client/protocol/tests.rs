@@ -983,3 +983,133 @@ fn huge_read_timeout_does_not_panic() {
         frame
     );
 }
+
+#[test]
+fn read_payload_length_must_match_bits_field() {
+    let limits = PduLimits::new(480).unwrap();
+    let mut data = vec![0xff, 4, 0, 32];
+    data.extend_from_slice(&[9; 5]);
+    let mut io = Scripted::pieces([data_frame(&ack(1, 4, &data))]);
+    let (mut reference, mut chunks) = (0, 0);
+    let mut buffer = [0xaa; 4];
+    let result = read_transfer(
+        &mut io,
+        &limits,
+        &mut reference,
+        transfer(0, false),
+        &mut buffer,
+        &mut chunks,
+        Duration::from_secs(1),
+    );
+    assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+    assert_eq!(buffer, [0xaa; 4]);
+}
+
+#[test]
+fn read_item_shorter_than_header_is_rejected() {
+    assert_kind(
+        &validate_read_response(&ack(1, 4, &[0xff, 4, 0]), 1, 2, 4),
+        kind::ISO_INVALID_TELEGRAM,
+    );
+}
+
+#[test]
+fn write_ack_with_extra_data_is_not_success() {
+    for data in [&[0xff, 0x00][..], &[][..]] {
+        assert_kind(
+            &validate_write_response(&ack(1, 5, data), 1),
+            kind::ISO_INVALID_TELEGRAM,
+        );
+    }
+}
+
+mod properties {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn read_item() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![Just(0xffu8), any::<u8>()],
+            prop_oneof![Just(3u8), Just(4u8), any::<u8>()],
+            vec(any::<u8>(), 0..=40),
+            prop_oneof![
+                Just(None),
+                any::<u16>().prop_map(Some),
+                (0u16..=40).prop_map(|n| Some(n * 8)),
+            ],
+        )
+            .prop_map(|(status, transport, payload, bits)| {
+                let bits = bits.unwrap_or((payload.len() * 8) as u16);
+                let mut item = vec![status, transport, (bits >> 8) as u8, bits as u8];
+                item.extend_from_slice(&payload);
+                item
+            })
+    }
+
+    fn coherent_ack() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![Just(2u8), Just(3u8), any::<u8>()],
+            prop_oneof![Just(1u16), any::<u16>()],
+            prop_oneof![Just([0u8, 0]), any::<[u8; 2]>()],
+            prop_oneof![
+                Just(vec![4u8, 1]),
+                Just(vec![5u8, 1]),
+                vec(any::<u8>(), 0..=4)
+            ],
+            prop_oneof![read_item(), vec(any::<u8>(), 0..=40)],
+        )
+            .prop_map(|(rosctr, reference, error, params, data)| {
+                let mut pdu = vec![0x32, rosctr, 0, 0];
+                pdu.extend_from_slice(&reference.to_be_bytes());
+                pdu.extend_from_slice(&(params.len() as u16).to_be_bytes());
+                pdu.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                pdu.extend_from_slice(&error);
+                pdu.extend_from_slice(&params);
+                pdu.extend_from_slice(&data);
+                pdu
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn coherent_ack_never_panics(pdu in coherent_ack(), n in prop_oneof![1usize..=40, 1usize..=462], bit in any::<bool>()) {
+            let (wl, n) = if bit { (1, 1) } else { (2, n) };
+            match validate_read_response(&pdu, 1, wl, n) {
+                Ok(data) => prop_assert_eq!(data.len(), n),
+                Err(e) => prop_assert!(e.get_type().is_some_and(|k| kind::ALL.contains(&k))),
+            }
+            if let Err(e) = validate_write_response(&pdu, 1) {
+                prop_assert!(e.get_type().is_some_and(|k| kind::ALL.contains(&k)));
+            }
+        }
+
+        #[test]
+        fn read_transfer_never_panics_and_keeps_buffer_on_error(pdu in coherent_ack(), n in prop_oneof![1usize..=40, 1usize..=462]) {
+            let limits = PduLimits::new(480).unwrap();
+            let mut io = Scripted::pieces([data_frame(&pdu)]);
+            let (mut reference, mut chunks) = (0, 0);
+            let mut buffer = vec![0xaa; n];
+            if read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
+                &mut buffer, &mut chunks, Duration::from_secs(1)).is_err() {
+                prop_assert!(buffer.iter().all(|b| *b == 0xaa));
+            }
+        }
+
+        #[test]
+        fn read_accepts_only_payload_of_requested_length(n in 1usize..=40, payload in vec(any::<u8>(), 0..=60)) {
+            let bits = (n * 8) as u16;
+            let mut item = vec![0xff, 4, (bits >> 8) as u8, bits as u8];
+            item.extend_from_slice(&payload);
+            let pdu = ack(1, 4, &item);
+            let result = validate_read_response(&pdu, 1, 2, n);
+            if payload.len() == n {
+                prop_assert_eq!(result.unwrap(), &payload[..]);
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
+    }
+}
