@@ -3,6 +3,7 @@ name = "rust7"
 version = "0.2.0"
 authors = ["Davide Nardella <davenardella@live.it>"]
 edition = "2021"
+autoexamples = false
 description = "Native Rust S7 client (Snap7-style) for Siemens PLCs."
 license = "MIT"
 readme = "README.md"
@@ -15,6 +16,10 @@ categories = ["network-programming","api-bindings"]
 [lib]
 name = "rust7"
 path = "src/lib.rs"
+
+[[example]]
+name = "sdk_client"
+path = "examples/sdk/client.rs"
 
 [dependencies]
 anyerror = { version = "0.1.13", default-features = false }

@@ -12,7 +12,7 @@ toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i 
 | --- | --- |
 | Formatowanie zmian Rust | `cargo fmt --all` |
 | Kontrola formatowania | `cargo fmt --all -- --check` |
-| Kontrola kompilacji wszystkich targetów | `cargo check --all-targets` |
+| Kontrola kompilacji wszystkich targetów (w tym przykładu `sdk_client`) | `cargo check --all-targets` |
 | Budowanie biblioteki | `cargo build` |
 | Testy jednostkowe i dokumentacji | `cargo test` |
 | Wybrany test | `cargo test <fragment_nazwy>` |
