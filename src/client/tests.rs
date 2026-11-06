@@ -6,14 +6,18 @@ fn public_bit_helpers_accept_full_byte_range_without_panicking() {
     let mut client = S7Client::new();
     for byte in [8191, 8192, 65535] {
         for bit in [0, 7] {
+            client.confirmed = 9;
             assert_kind(
                 &client.read_bit(S7_AREA_DB, 1, byte, bit),
                 kind::NOT_CONNECTED,
             );
+            assert_eq!(client.confirmed, 0);
+            client.confirmed = 9;
             assert_kind(
                 &client.write_bit(S7_AREA_DB, 1, byte, bit, true),
                 kind::NOT_CONNECTED,
             );
+            assert_eq!(client.confirmed, 0);
         }
     }
 }
@@ -23,11 +27,15 @@ fn invalid_public_inputs_clear_statistics_and_return_errors() {
     let mut client = S7Client::new();
     client.last_time = 42.0;
     client.chunks = 9;
+    client.confirmed = 9;
     assert_kind(
         &client.read_bit(S7_AREA_DB, 1, 0, 8),
         kind::INVALID_FUN_PARAMETER,
     );
-    assert_eq!((client.last_time, client.chunks), (0.0, 0));
+    assert_eq!(
+        (client.last_time, client.chunks, client.confirmed),
+        (0.0, 0, 0)
+    );
     assert_kind(
         &client.write_bit(S7_AREA_DB, 1, 0, 8, false),
         kind::INVALID_FUN_PARAMETER,
@@ -94,7 +102,8 @@ fn only_transport_errors_break_the_session() {
     for e in [
         error::s7_invalid_address(),
         error::s7_not_found(),
-        error::s7_unspecified(),
+        error::s7_header_error(0x81, 4),
+        error::s7_item_error(3),
         error::invalid_fun_parameter(),
         error::not_connected(),
     ] {

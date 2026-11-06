@@ -6,13 +6,14 @@ Ten plik jest wspólnym źródłem instrukcji projektu; nie twórz kopii w CLAUD
 ## Środowisko i komendy
 
 Uruchamiaj komendy z katalogu zawierającego główny Cargo.toml. Potrzebujesz
-toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i clippy.
+toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i clippy. Uruchomienie testów (dev-dependency proptest) wymaga
+Rust ≥ 1.88; sama biblioteka wymaga tylko edition 2021.
 
 | Cel | Komenda |
 | --- | --- |
 | Formatowanie zmian Rust | `cargo fmt --all` |
 | Kontrola formatowania | `cargo fmt --all -- --check` |
-| Kontrola kompilacji wszystkich targetów | `cargo check --all-targets` |
+| Kontrola kompilacji wszystkich targetów (w tym przykładu `sdk_client`) | `cargo check --all-targets` |
 | Budowanie biblioteki | `cargo build` |
 | Testy jednostkowe i dokumentacji | `cargo test` |
 | Wybrany test | `cargo test <fragment_nazwy>` |
@@ -52,8 +53,9 @@ rename i sprawdź wynikowy diff.
 - Zachowaj implementację bez unsafe oraz walidację ramek i granic adresowania.
   Zmiany protokołu sprawdzaj wraz z testami w src/client/tests.rs,
   src/client/protocol/tests.rs i tests/tcp_smoke.rs.
-- Wieloczęściowy zapis nie jest atomowy: wcześniejsze części mogą dotrzeć do PLC
-  przed błędem. Nie dodawaj automatycznych ponowień zapisów bez rozstrzygnięcia
+- Zapis nie jest atomowy, także przy zapisie jednoczęściowym i `write_bit`:
+  wcześniejsze części mogą dotrzeć do PLC przed błędem, a także część, przy której
+  wystąpił błąd; potwierdzone bajty to `[0, confirmed)`. Nie dodawaj automatycznych ponowień zapisów bez rozstrzygnięcia
   ich semantyki. Po błędzie odczytu bufor nie jest kompletnym wynikiem.
 - Nie uruchamiaj przykładów przeciw rzeczywistemu PLC bez wyraźnego zlecenia
   i wskazania urządzenia; do testów transportu używaj lokalnego mocka.

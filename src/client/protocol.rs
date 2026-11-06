@@ -1,4 +1,4 @@
-use crate::error::{self, Result};
+use crate::error::{self, AnyError, Result};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -47,7 +47,7 @@ pub(super) fn negotiate<T: FrameRead + Write>(
     request[23..25].copy_from_slice(&requested_pdu.to_be_bytes());
     io.write_all(&request).map_err(error::io)?;
     let frame = read_tpkt(io, 487, timeout)?;
-    let pdu = data_payload(&frame).map_err(|_| error::pdu_negotiation_failed())?;
+    let pdu = data_payload(&frame).map_err(error::pdu_negotiation_failed_by)?;
     // One outstanding job in each direction was requested; all these fields
     // belong to the Setup Communication ACK_DATA, not to the negotiated size.
     if pdu.len() != 20 || pdu[..18] != [0x32, 3, 0, 0, 4, 0, 0, 8, 0, 0, 0, 0, 0xf0, 0, 0, 1, 0, 1]
@@ -97,17 +97,35 @@ fn read_full<R: FrameRead>(
             None => timeout,
         };
         if limit.is_zero() {
-            return Err(error::io(io::ErrorKind::TimedOut.into()));
+            return Err(timed_out(timeout));
         }
         reader.limit_next_read(limit).map_err(error::io)?;
         match reader.read(&mut buf[filled..]) {
             Ok(0) => return Err(error::connection_closed()),
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(timed_out(timeout));
+            }
             Err(e) => return Err(error::io(e)),
         }
     }
     Ok(())
+}
+
+fn timed_out(timeout: Duration) -> AnyError {
+    error::io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "no complete response frame within {} ms",
+            timeout.as_millis()
+        ),
+    ))
 }
 
 fn valid_tpkt(frame: &[u8]) -> bool {
@@ -177,13 +195,13 @@ fn ack_data(pdu: &[u8], reference: u16, function: u8) -> Result<&[u8]> {
         // Only a header-only error ACK completes the job. An empty success ACK
         // does not confirm that a read or write was performed.
         return if params == 0 && data == 0 && pdu[10..12] != [0, 0] {
-            Err(error::s7_unspecified())
+            Err(error::s7_header_error(pdu[10], pdu[11]))
         } else {
             Err(error::iso_invalid_telegram())
         };
     }
     if pdu[10..12] != [0, 0] {
-        return Err(error::s7_unspecified());
+        return Err(error::s7_header_error(pdu[10], pdu[11]));
     }
     if params != 2 || pdu.len() < 14 || pdu[12..14] != [function, 1] {
         return Err(error::iso_invalid_telegram());
@@ -196,7 +214,7 @@ fn item_status(status: u8) -> Result<()> {
         0xff => Ok(()),
         5 => Err(error::s7_invalid_address()),
         10 => Err(error::s7_not_found()),
-        _ => Err(error::s7_unspecified()),
+        code => Err(error::s7_item_error(code)),
     }
 }
 
@@ -356,13 +374,20 @@ fn valid_area(area: u8) -> Result<()> {
     Ok(())
 }
 
+/// Transfer counters shared with the caller so they survive an error.
+#[derive(Default)]
+pub(super) struct Progress {
+    pub(super) chunks: usize,
+    pub(super) confirmed: usize,
+}
+
 pub(super) fn read_transfer<T: FrameRead + Write>(
     io: &mut T,
     limits: &PduLimits,
     reference: &mut u16,
     transfer: Transfer,
     buffer: &mut [u8],
-    chunks: &mut usize,
+    progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
     valid_area(transfer.area)?;
@@ -372,13 +397,14 @@ pub(super) fn read_transfer<T: FrameRead + Write>(
         let count = (len - offset).min(limits.read_payload);
         let reference = next_reference(reference);
         let req = request(&transfer, offset, count, reference, None);
-        *chunks += 1;
+        progress.chunks += 1;
         io.write_all(&req).map_err(error::io)?;
         let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         let data =
             validate_read_response(data_payload(&frame)?, reference, transfer.wordlen, count)?;
         buffer[offset..offset + count].copy_from_slice(data);
         offset += count;
+        progress.confirmed = offset;
     }
     Ok(())
 }
@@ -389,7 +415,7 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
     reference: &mut u16,
     transfer: Transfer,
     buffer: &[u8],
-    chunks: &mut usize,
+    progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
     valid_area(transfer.area)?;
@@ -406,11 +432,12 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
             &buffer[offset..offset + count]
         };
         let req = request(&transfer, offset, count, reference, Some(payload));
-        *chunks += 1;
+        progress.chunks += 1;
         io.write_all(&req).map_err(error::io)?;
         let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
         validate_write_response(data_payload(&frame)?, reference)?;
         offset += count;
+        progress.confirmed = offset;
     }
     Ok(())
 }

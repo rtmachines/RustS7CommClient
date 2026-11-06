@@ -68,6 +68,13 @@ pub struct S7Client {
     /// Number of read/write chunks attempted in the last operation.
     /// Reset before validation; includes the failing chunk if an I/O or PLC error occurs.
     pub chunks: usize,
+    /// Number of buffer bytes confirmed in the last read/write: copied from verified
+    /// responses (read) or acknowledged by the PLC (write). Reset with `chunks`;
+    /// `chunks == 0` means no request was sent.
+    /// For writes, after an error bytes `[0, confirmed)` were acknowledged, the chunk starting at
+    /// `confirmed` may or may not have been written by the PLC, and later bytes were not sent;
+    /// for reads, only `[0, confirmed)` of the buffer is a result.
+    pub confirmed: usize,
 }
 
 impl S7Client {
@@ -92,6 +99,7 @@ impl S7Client {
             connected: false,
             last_time: 0.0,
             chunks: 0,
+            confirmed: 0,
         }
     }
 
@@ -112,14 +120,14 @@ impl S7Client {
     /// - `CT_OP`: (as an HMI)
     /// - `CT_S7`: (as a generic device)
     ///
-    /// In practice, there aren't many differences; the S7_PG connection should ensure
+    /// In practice, there aren't many differences; the `CT_PG` connection should ensure
     /// better system responsiveness, but in reality, I've never noticed any noticeable differences.
     ///
     /// `CT_PG` is used by default.
     ///
     /// With very old PLCs (early S7300 series) that have limited communication resources,
     /// the connection may be rejected if we have S7Manager with many online windows open at the same time.
-    /// In this case, use `S7_OP` or `S7_BASIC`.
+    /// In this case, use `CT_OP` or `CT_S7`.
     ///
     /// ### Parameters
     /// - `connection_type`: Connection type.
@@ -150,7 +158,8 @@ impl S7Client {
     /// ### Parameters
     /// - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
     /// - `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
-    /// - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
+    /// - `wr_timeout_ms` : Socket send timeout for each request (ms) (Default = 500 ms);
+    ///   the PLC acknowledgement of a write is bounded by `rd_timeout_ms`
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `AnyError` on failure.
@@ -188,7 +197,7 @@ impl S7Client {
     /// The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
     ///
     /// ### Parameters
-    /// - `port`: TCP Connection port (1..65535)
+    /// - `port`: TCP Connection port (1..=65535)
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `AnyError` on failure.
@@ -294,11 +303,11 @@ impl S7Client {
     ///
     /// ### Errors
     /// - `kind::TCP_CONNECTION_FAILED`: the address resolves to no socket address.
-    /// - `kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+    /// - `kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error; a reply not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
     /// - `kind::CONNECTION_CLOSED`: the peer closed the connection.
     /// - `kind::ISO_INVALID_HEADER` / `kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
     /// - `kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
-    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size.
+    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a COTP framing error in the Setup Communication reply is the error's `source()`.
     ///
     /// ### Negotiated limits
     /// The S7 offer is at most 480 bytes and fits in one COTP TPDU, including its
@@ -352,16 +361,16 @@ impl S7Client {
             hi_part!(ISO_CR_LEN), // High part of packet lenght (entire frame, payload and TPDU included)
             lo_part!(ISO_CR_LEN), // Low part of packet lenght (entire frame, payload and TPDU included)
             // COTP (ISO 8073 Header)
-            0x11,                  // PDU Size Length
+            0x11,                  // COTP header length (LI = 17)
             ISO_CONN_REQ,          // CR - Connection Request ID
             0x00,                  // Dst Reference HI
             0x00,                  // Dst Reference LO
             0x00,                  // Src Reference HI
             0x01,                  // Src Reference LO
             0x00,                  // Class + Options Flags
-            0xC0,                  // PDU Max Length ID
-            0x01,                  // PDU Max Length HI
-            0x0A,                  // PDU Max Length LO
+            0xC0,                  // TPDU size parameter
+            0x01,                  // Parameter length
+            0x0A,                  // TPDU size exponent (2^10 = 1024)
             0xC1,                  // Src TSAP Identifier
             0x02,                  // Src TSAP Length (2 bytes)
             hi_part!(local_tsap),  // Loc TSAP HI
@@ -439,8 +448,8 @@ impl S7Client {
     /// - `kind::ISO_INVALID_HEADER`: Invalid ISO Header
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-    /// - `kind::IO`: network I/O error, including a response not received within the read timeout.
-    /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
+    /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
+    /// - `kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
     ///
     /// #### Connection after errors
     /// After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or
@@ -450,7 +459,7 @@ impl S7Client {
     /// #### High level
     /// - `kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
     /// - `kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`.
+    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
     /// - `kind::S7_INVALID_ADDRESS`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -462,7 +471,7 @@ impl S7Client {
     ///   An invalid range is rejected before sending any request.
     /// - Bit operations require a nonempty buffer and use only its first byte.
     /// - Empty byte buffers send no telegram after parameter and connection checks.
-    /// - On error, earlier chunks may already be copied; discard the buffer.
+    /// - On error only `[0, confirmed)` of the buffer is a result.
     /// - Each response is checked against the request and expected payload length.
     ///
     pub fn read_area(
@@ -492,6 +501,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         self.check_area(area)?;
         protocol::validate_transfer(start, wordlen, buffer.len())?;
         if !self.connected {
@@ -500,6 +510,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
         let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
         let time = Instant::now();
+        let mut progress = protocol::Progress::default();
         let result = protocol::read_transfer(
             stream,
             limits,
@@ -511,9 +522,11 @@ impl S7Client {
                 wordlen,
             },
             buffer,
-            &mut self.chunks,
+            &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
         );
+        self.chunks = progress.chunks;
+        self.confirmed = progress.confirmed;
         self.finish(result, time)
     }
 
@@ -550,8 +563,8 @@ impl S7Client {
     /// - `kind::ISO_INVALID_HEADER`: Invalid ISO Header
     /// - `kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
     /// - `kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-    /// - `kind::IO`: network I/O error, including a response not received within the read timeout.
-    /// - `kind::CONNECTION_CLOSED`: the PLC closed the connection.
+    /// - `kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
+    /// - `kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
     ///
     /// #### Connection after errors
     /// After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or
@@ -561,15 +574,16 @@ impl S7Client {
     /// #### High level
     /// - `kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
     /// - `kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`.
+    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
     /// - `kind::S7_INVALID_ADDRESS`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
     ///
     /// ### Notes
     /// - A successful byte write transfers the entire buffer.
-    /// - Writes are not atomic across chunks. On error, earlier chunks may already be written.
-    ///   The client never automatically retries a write.
+    /// - Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC;
+    ///   the chunk starting at `confirmed` may or may not have been written, also for a
+    ///   single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
     /// - Large blocks, including buffers larger than 65535 bytes, are split into chunks.
     /// - A byte transfer must fit in the 24-bit bit address (last byte at most 0x1fffff).
     ///   An invalid range is rejected before sending any request.
@@ -605,6 +619,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         self.check_area(area)?;
         protocol::validate_transfer(start, wordlen, buffer.len())?;
         if !self.connected {
@@ -613,6 +628,7 @@ impl S7Client {
         let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
         let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
         let time = Instant::now();
+        let mut progress = protocol::Progress::default();
         let result = protocol::write_transfer(
             stream,
             limits,
@@ -624,9 +640,11 @@ impl S7Client {
                 wordlen,
             },
             buffer,
-            &mut self.chunks,
+            &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
         );
+        self.chunks = progress.chunks;
+        self.confirmed = progress.confirmed;
         self.finish(result, time)
     }
 
@@ -660,6 +678,7 @@ impl S7Client {
     ///
     /// ### Notes
     /// - The number of bytes to read will be equal to the size of the buffer passed.
+    /// - On error only `[0, confirmed)` of the buffer is a result.
     /// ---
     /// For further info, please refer to `read_area()`
     ///
@@ -725,6 +744,7 @@ impl S7Client {
     ) -> Result<bool> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         let start = protocol::bit_start(byte_num, bit_idx)?;
         let mut buffer = [0u8; 1];
         self.read_area_impl(area, db_number, start, S7_WL_BIT, &mut buffer)?;
@@ -745,8 +765,9 @@ impl S7Client {
     ///
     /// ### Notes
     /// - A successful byte write transfers the entire buffer.
-    /// - Writes are not atomic across chunks. On error, earlier chunks may already be written.
-    ///   The client never automatically retries a write.
+    /// - Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC;
+    ///   the chunk starting at `confirmed` may or may not have been written, also for a
+    ///   single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
     /// ---
     /// For further info, please refer to `write_area()`
     ///
@@ -782,6 +803,8 @@ impl S7Client {
     ///
     /// ### Notes
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
+    /// After an error `confirmed` is 0 and the request may or may not have been applied by the PLC.
+    /// The client never retries a write.
     /// ---
     /// For further info, please refer to `write_area()`
     ///
@@ -811,6 +834,7 @@ impl S7Client {
     ) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
+        self.confirmed = 0;
         let start = protocol::bit_start(byte_num, bit_idx)?;
         self.write_area_impl(area, db_number, start, S7_WL_BIT, &[u8::from(value)])
     }

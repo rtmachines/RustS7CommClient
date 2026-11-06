@@ -137,11 +137,30 @@ fn read_tpkt_propagates_eof_and_timeout() {
             assert_kind(&result, kind::CONNECTION_CLOSED);
         } else {
             assert_kind(&result, kind::IO);
-            let err = result.unwrap_err();
-            assert!(err
-                .to_string()
-                .contains(&io::Error::from(io_kind).to_string()));
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "rust7::Io: no complete response frame within 1000 ms"
+            );
         }
+    }
+}
+
+#[test]
+fn other_io_errors_are_not_reported_as_timeout() {
+    for io_kind in [
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+    ] {
+        let mut io = Scripted::pieces([vec![3, 0, 0, 22], vec![0; 3]]);
+        io.reads.push_back(Err(io_kind.into()));
+        let result = read_tpkt(&mut io, 487, Duration::from_secs(1));
+        assert_kind(&result, kind::IO);
+        let message = result.unwrap_err().to_string();
+        assert!(!message.contains("no complete response frame"), "{message}");
+        assert!(
+            message.contains(&io::Error::from(io_kind).to_string()),
+            "{message}"
+        );
     }
 }
 
@@ -188,6 +207,27 @@ fn negotiation_response(length: u16) -> Vec<u8> {
         (length >> 8) as u8,
         length as u8,
     ])
+}
+
+#[test]
+fn negotiation_keeps_framing_error_as_source() {
+    use std::error::Error as _;
+    for (index, cause) in [
+        (5, kind::ISO_INVALID_HEADER),
+        (6, kind::ISO_FRAGMENTED_PACKET),
+    ] {
+        let mut bad = negotiation_response(480);
+        bad[index] = 0;
+        let mut io = Scripted::pieces([bad]);
+        let err = negotiate(&mut io, 1024, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(err.get_type(), Some(kind::PDU_NEGOTIATION_FAILED));
+        assert_eq!(
+            err.source()
+                .and_then(|s| s.downcast_ref::<AnyError>())
+                .and_then(|s| s.get_type()),
+            Some(cause)
+        );
+    }
 }
 
 #[test]
@@ -270,19 +310,20 @@ fn negotiation_rejects_size_outside_the_offer() {
 fn minimum_pdu_writes_one_byte_per_chunk() {
     let limits = PduLimits::new(29).unwrap();
     let mut io = Scripted::pieces((1..=3).map(|r| data_frame(&ack(r, 5, &[0xff]))));
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     write_transfer(
         &mut io,
         &limits,
         &mut reference,
         transfer(10, false),
         &[7, 8, 9],
-        &mut chunks,
+        &mut progress,
         Duration::from_secs(1),
     )
     .unwrap();
     let packets = requests(&io);
-    assert_eq!(chunks, 3);
+    assert_eq!(progress.chunks, 3);
     assert_eq!(packets.len(), 3);
     for (i, p) in packets.iter().enumerate() {
         assert_eq!(&p[23..25], &[0, 1]);
@@ -371,13 +412,23 @@ fn error_ack(reference: u16) -> Vec<u8> {
 #[test]
 fn terminal_error_ack_reports_plc_error() {
     for error in [[0x81, 4], [0x81, 0], [0, 4]] {
-        let mut pdu = error_ack(0x1234);
-        pdu[10..12].copy_from_slice(&error);
-        assert_kind(
-            &validate_read_response(&pdu, 0x1234, 2, 4),
-            kind::S7_UNSPECIFIED,
-        );
-        assert_kind(&validate_write_response(&pdu, 0x1234), kind::S7_UNSPECIFIED);
+        let expected = format!("(error class {:#04x}, code {:#04x})", error[0], error[1]);
+        // A header-only ACK (ROSCTR 2) and a full ACK_DATA (ROSCTR 3) carry the same fields.
+        let header_only = error_ack(0x1234);
+        let read_data = ack(0x1234, 4, &[0xff, 4, 0, 32, 1, 2, 3, 4]);
+        let write_data = ack(0x1234, 5, &[0xff]);
+        for (mut read_pdu, mut write_pdu) in
+            [(header_only.clone(), header_only), (read_data, write_data)]
+        {
+            read_pdu[10..12].copy_from_slice(&error);
+            write_pdu[10..12].copy_from_slice(&error);
+            let read = validate_read_response(&read_pdu, 0x1234, 2, 4);
+            let write = validate_write_response(&write_pdu, 0x1234);
+            assert_kind(&read, kind::S7_UNSPECIFIED);
+            assert_kind(&write, kind::S7_UNSPECIFIED);
+            assert!(read.unwrap_err().to_string().contains(&expected));
+            assert!(write.unwrap_err().to_string().contains(&expected));
+        }
     }
 }
 
@@ -403,7 +454,8 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
             // A response for the next operation must remain unread after the error.
             io.reads.push_back(Ok(success(completed as u16 + 2, 1)));
             let mut buffer = vec![0xaa; chunk_size * 3];
-            let (mut reference, mut chunks) = (0, 0);
+            let mut reference = 0;
+            let mut progress = Progress::default();
             let result = if writing {
                 write_transfer(
                     &mut io,
@@ -411,7 +463,7 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
                     &mut reference,
                     transfer(17, false),
                     &buffer,
-                    &mut chunks,
+                    &mut progress,
                     Duration::from_secs(1),
                 )
             } else {
@@ -421,14 +473,14 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
                     &mut reference,
                     transfer(17, false),
                     &mut buffer,
-                    &mut chunks,
+                    &mut progress,
                     Duration::from_secs(1),
                 )
             };
             assert_kind(&result, kind::S7_UNSPECIFIED);
-            assert_eq!(chunks, completed + 1);
-            assert_eq!(usize::from(reference), chunks);
-            assert_eq!(requests(&io).len(), chunks);
+            assert_eq!(progress.chunks, completed + 1);
+            assert_eq!(usize::from(reference), progress.chunks);
+            assert_eq!(requests(&io).len(), progress.chunks);
             assert_eq!(io.reads.len(), 1);
             let copied = if writing { 0 } else { completed * chunk_size };
             assert_eq!(&buffer[..copied], vec![42; copied]);
@@ -440,7 +492,7 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
                     &mut reference,
                     transfer(0, false),
                     &[1],
-                    &mut chunks,
+                    &mut progress,
                     Duration::from_secs(1),
                 )
                 .unwrap();
@@ -452,7 +504,7 @@ fn terminal_error_ack_stops_transfer_without_retry_or_copying_failed_chunk() {
                     &mut reference,
                     transfer(0, false),
                     &mut next,
-                    &mut chunks,
+                    &mut progress,
                     Duration::from_secs(1),
                 )
                 .unwrap();
@@ -602,6 +654,9 @@ fn response_preserves_plc_errors() {
                     | ("missing", Some(kind::S7_NOT_FOUND))
                     | ("other", Some(kind::S7_UNSPECIFIED))
             ));
+            if expected == "other" {
+                assert!(err.to_string().contains("(item return code 0x07)"), "{err}");
+            }
         }
     }
 }
@@ -645,7 +700,8 @@ fn bit_address_does_not_wrap() {
                 data_frame(&read_ack(1, &[1], true)),
                 data_frame(&ack(2, 5, &[0xff])),
             ]);
-            let (mut reference, mut chunks) = (0, 0);
+            let mut reference = 0;
+            let mut progress = Progress::default();
             let mut buffer = [0; 4];
             read_transfer(
                 &mut io,
@@ -653,7 +709,7 @@ fn bit_address_does_not_wrap() {
                 &mut reference,
                 transfer(start, true),
                 &mut buffer,
-                &mut chunks,
+                &mut progress,
                 Duration::from_secs(1),
             )
             .unwrap();
@@ -664,7 +720,7 @@ fn bit_address_does_not_wrap() {
                 &mut reference,
                 transfer(start, true),
                 &[1, 99],
-                &mut chunks,
+                &mut progress,
                 Duration::from_secs(1),
             )
             .unwrap();
@@ -707,7 +763,8 @@ fn large_transfer_is_complete() {
                     assert!(response.len() - 4 <= usize::from(tpdu));
                     io.reads.push_back(Ok(response));
                 }
-                let (mut reference, mut chunks) = (0, 0);
+                let mut reference = 0;
+                let mut progress = Progress::default();
                 if writing {
                     write_transfer(
                         &mut io,
@@ -715,7 +772,7 @@ fn large_transfer_is_complete() {
                         &mut reference,
                         transfer(17, false),
                         &expected,
-                        &mut chunks,
+                        &mut progress,
                         Duration::from_secs(1),
                     )
                     .unwrap();
@@ -727,7 +784,7 @@ fn large_transfer_is_complete() {
                         &mut reference,
                         transfer(17, false),
                         &mut buffer,
-                        &mut chunks,
+                        &mut progress,
                         Duration::from_secs(1),
                     )
                     .unwrap();
@@ -735,7 +792,7 @@ fn large_transfer_is_complete() {
                 }
                 let packets = requests(&io);
                 assert_eq!(packets.len(), expected.chunks(limit).len());
-                assert_eq!(chunks, packets.len());
+                assert_eq!(progress.chunks, packets.len());
                 let mut offset = 0;
                 for (index, packet) in packets.iter().enumerate() {
                     assert!(packet.len() - 4 <= usize::from(tpdu));
@@ -770,7 +827,8 @@ fn large_transfer_is_complete() {
 fn empty_bit_buffer_rejected_before_io() {
     let mut io = Scripted::default();
     let limits = PduLimits::new(480).unwrap();
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     assert_kind(
         &read_transfer(
             &mut io,
@@ -778,7 +836,7 @@ fn empty_bit_buffer_rejected_before_io() {
             &mut reference,
             transfer(0, true),
             &mut [],
-            &mut chunks,
+            &mut progress,
             Duration::from_secs(1),
         ),
         kind::INVALID_FUN_PARAMETER,
@@ -790,27 +848,28 @@ fn empty_bit_buffer_rejected_before_io() {
             &mut reference,
             transfer(0, true),
             &[],
-            &mut chunks,
+            &mut progress,
             Duration::from_secs(1),
         ),
         kind::INVALID_FUN_PARAMETER,
     );
     assert!(io.writes.is_empty());
-    assert_eq!((reference, chunks), (0, 0));
+    assert_eq!((reference, progress.chunks), (0, 0));
 }
 
 #[test]
 fn byte_empty_is_noop() {
     let mut io = Scripted::default();
     let limits = PduLimits::new(480).unwrap();
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     read_transfer(
         &mut io,
         &limits,
         &mut reference,
         transfer(0, false),
         &mut [],
-        &mut chunks,
+        &mut progress,
         Duration::from_secs(1),
     )
     .unwrap();
@@ -820,12 +879,12 @@ fn byte_empty_is_noop() {
         &mut reference,
         transfer(0, false),
         &[],
-        &mut chunks,
+        &mut progress,
         Duration::from_secs(1),
     )
     .unwrap();
     assert!(io.writes.is_empty());
-    assert_eq!((reference, chunks), (0, 0));
+    assert_eq!((reference, progress.chunks), (0, 0));
 }
 
 #[test]
@@ -836,7 +895,8 @@ fn address_range_checked_before_io() {
     assert!(validate_transfer(0x1000000, 1, 1).is_err());
     let mut io = Scripted::default();
     let limits = PduLimits::new(480).unwrap();
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     let buffer = vec![0; 0x200000 - 65535 + 1];
     assert_kind(
         &write_transfer(
@@ -845,7 +905,7 @@ fn address_range_checked_before_io() {
             &mut reference,
             transfer(65535, false),
             &buffer,
-            &mut chunks,
+            &mut progress,
             Duration::from_secs(1),
         ),
         kind::INVALID_FUN_PARAMETER,
@@ -858,7 +918,7 @@ fn address_range_checked_before_io() {
         &mut reference,
         transfer(65535, false),
         &mut buffer,
-        &mut chunks,
+        &mut progress,
         Duration::from_secs(1)
     )
     .is_err());
@@ -872,7 +932,8 @@ fn second_write_chunk_failure_stops_without_retry() {
         data_frame(&ack(1, 5, &[0xff])),
         data_frame(&ack(2, 5, &[5])),
     ]);
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     assert_kind(
         &write_transfer(
             &mut io,
@@ -880,23 +941,90 @@ fn second_write_chunk_failure_stops_without_retry() {
             &mut reference,
             transfer(0, false),
             &vec![42; 600],
-            &mut chunks,
+            &mut progress,
             Duration::from_secs(1),
         ),
         kind::S7_INVALID_ADDRESS,
     );
     let packets = requests(&io);
     assert_eq!(packets.len(), 2);
-    assert_eq!(chunks, 2);
+    assert_eq!(progress.chunks, 2);
+    assert_eq!(progress.confirmed, 212);
     assert_eq!(&packets[0][28..31], &[0, 0, 0]);
     assert_eq!(&packets[1][28..31], &[0, 6, 0xa0]);
+}
+
+#[test]
+fn read_progress_counts_only_accepted_chunks() {
+    let limits = PduLimits::new(240).unwrap();
+    let mut io = Scripted::pieces([
+        data_frame(&read_ack(1, &[7; 222], false)),
+        data_frame(&ack(2, 4, &[5, 0, 0, 0])),
+    ]);
+    let mut reference = 0;
+    let mut progress = Progress::default();
+    let mut buffer = vec![0xaa; 600];
+    assert_kind(
+        &read_transfer(
+            &mut io,
+            &limits,
+            &mut reference,
+            transfer(0, false),
+            &mut buffer,
+            &mut progress,
+            Duration::from_secs(1),
+        ),
+        kind::S7_INVALID_ADDRESS,
+    );
+    assert_eq!((progress.chunks, progress.confirmed), (2, 222));
+    assert_eq!(buffer[..222], [7; 222]);
+    assert!(buffer[222..].iter().all(|b| *b == 0xaa));
+}
+
+#[test]
+fn bit_write_confirms_one_byte() {
+    let limits = PduLimits::new(240).unwrap();
+    let mut io = Scripted::pieces([data_frame(&ack(1, 5, &[0xff]))]);
+    let mut reference = 0;
+    let mut progress = Progress::default();
+    write_transfer(
+        &mut io,
+        &limits,
+        &mut reference,
+        transfer(0, true),
+        &[1, 2, 3],
+        &mut progress,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(progress.confirmed, 1);
+}
+
+#[test]
+fn empty_byte_transfer_confirms_nothing() {
+    let limits = PduLimits::new(240).unwrap();
+    let mut io = Scripted::pieces([]);
+    let mut reference = 0;
+    let mut progress = Progress::default();
+    write_transfer(
+        &mut io,
+        &limits,
+        &mut reference,
+        transfer(0, false),
+        &[],
+        &mut progress,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!((progress.confirmed, progress.chunks), (0, 0));
 }
 
 #[test]
 fn short_read_leaves_destination_unchanged() {
     let limits = PduLimits::new(480).unwrap();
     let mut io = Scripted::pieces([data_frame(&read_ack(1, &[1], false))]);
-    let (mut reference, mut chunks) = (0, 0);
+    let mut reference = 0;
+    let mut progress = Progress::default();
     let mut buffer = [42; 4];
     assert!(read_transfer(
         &mut io,
@@ -904,7 +1032,7 @@ fn short_read_leaves_destination_unchanged() {
         &mut reference,
         transfer(0, false),
         &mut buffer,
-        &mut chunks,
+        &mut progress,
         Duration::from_secs(1)
     )
     .is_err());
@@ -938,14 +1066,15 @@ fn bit_write_payload_is_normalized() {
         (vec![0, 1], 0),
     ] {
         let mut io = Scripted::pieces([data_frame(&ack(1, 5, &[0xff]))]);
-        let (mut reference, mut chunks) = (0, 0);
+        let mut reference = 0;
+        let mut progress = Progress::default();
         write_transfer(
             &mut io,
             &limits,
             &mut reference,
             transfer(3, true),
             &input,
-            &mut chunks,
+            &mut progress,
             Duration::from_secs(1),
         )
         .unwrap();
@@ -967,7 +1096,7 @@ fn frame_deadline_bounds_slow_peer() {
     assert_eq!(err.get_type(), Some(kind::IO));
     assert!(err
         .to_string()
-        .contains(&io::Error::from(io::ErrorKind::TimedOut).to_string()));
+        .contains("no complete response frame within 100 ms"));
     assert!(started.elapsed() < Duration::from_millis(400));
     assert!(!io.reads.is_empty());
     assert!(io.timeouts.iter().all(|t| *t <= Duration::from_millis(100)));
@@ -982,4 +1111,187 @@ fn huge_read_timeout_does_not_panic() {
         read_tpkt(&mut io, 487, Duration::from_millis(u64::MAX)).unwrap(),
         frame
     );
+}
+
+#[test]
+fn huge_timeout_with_wouldblock_reports_unified_message() {
+    let mut io = Scripted::pieces([vec![3, 0, 0, 22]]);
+    io.reads.push_back(Err(io::ErrorKind::WouldBlock.into()));
+    let err = read_tpkt(&mut io, 487, Duration::from_millis(u64::MAX)).unwrap_err();
+    assert_eq!(err.get_type(), Some(kind::IO));
+    assert!(err.to_string().contains("within 18446744073709551615 ms"));
+}
+
+#[test]
+fn interrupted_read_is_retried() {
+    let frame = data_frame(&[0x32; 20]);
+    let mut io = Scripted::pieces([]);
+    io.reads.push_back(Err(io::ErrorKind::Interrupted.into()));
+    io.reads.push_back(Ok(frame.clone()));
+    assert_eq!(
+        read_tpkt(&mut io, 487, Duration::from_secs(1)).unwrap(),
+        frame
+    );
+}
+
+#[test]
+fn read_payload_length_must_match_bits_field() {
+    let limits = PduLimits::new(480).unwrap();
+    let mut data = vec![0xff, 4, 0, 32];
+    data.extend_from_slice(&[9; 5]);
+    let mut io = Scripted::pieces([data_frame(&ack(1, 4, &data))]);
+    let mut reference = 0;
+    let mut progress = Progress::default();
+    let mut buffer = [0xaa; 4];
+    let result = read_transfer(
+        &mut io,
+        &limits,
+        &mut reference,
+        transfer(0, false),
+        &mut buffer,
+        &mut progress,
+        Duration::from_secs(1),
+    );
+    assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+    assert_eq!(buffer, [0xaa; 4]);
+}
+
+#[test]
+fn read_item_shorter_than_header_is_rejected() {
+    assert_kind(
+        &validate_read_response(&ack(1, 4, &[0xff, 4, 0]), 1, 2, 4),
+        kind::ISO_INVALID_TELEGRAM,
+    );
+}
+
+#[test]
+fn write_ack_with_extra_data_is_not_success() {
+    for data in [&[0xff, 0x00][..], &[][..]] {
+        assert_kind(
+            &validate_write_response(&ack(1, 5, data), 1),
+            kind::ISO_INVALID_TELEGRAM,
+        );
+    }
+}
+
+mod properties {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn read_item() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![4 => Just(0xffu8), 1 => any::<u8>()],
+            prop_oneof![4 => Just(4u8), 2 => Just(3u8), 1 => any::<u8>()],
+            vec(any::<u8>(), 0..=40),
+            prop_oneof![
+                Just(None),
+                any::<u16>().prop_map(Some),
+                (0u16..=40).prop_map(|n| Some(n * 8)),
+            ],
+        )
+            .prop_map(|(status, transport, payload, bits)| {
+                let bits = bits.unwrap_or((payload.len() * 8) as u16);
+                let mut item = vec![status, transport, (bits >> 8) as u8, bits as u8];
+                item.extend_from_slice(&payload);
+                item
+            })
+    }
+
+    fn short_item() -> impl Strategy<Value = Vec<u8>> {
+        vec(any::<u8>(), 0..=3).prop_map(|rest| [&[0xff][..], &rest].concat())
+    }
+
+    fn coherent_ack() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![6 => Just(3u8), 1 => Just(2u8), 1 => any::<u8>()],
+            prop_oneof![6 => Just(1u16), 1 => any::<u16>()],
+            prop_oneof![6 => Just([0u8, 0]), 1 => any::<[u8; 2]>()],
+            prop_oneof![
+                3 => Just(vec![4u8, 1]),
+                2 => Just(vec![5u8, 1]),
+                1 => vec(any::<u8>(), 0..=4)
+            ],
+            prop_oneof![
+                4 => read_item(),
+                2 => short_item(),
+                1 => Just(Vec::new()),
+                1 => vec(any::<u8>(), 0..=40)
+            ],
+        )
+            .prop_map(|(rosctr, reference, error, params, data)| {
+                let mut pdu = vec![0x32, rosctr, 0, 0];
+                pdu.extend_from_slice(&reference.to_be_bytes());
+                pdu.extend_from_slice(&(params.len() as u16).to_be_bytes());
+                pdu.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                pdu.extend_from_slice(&error);
+                pdu.extend_from_slice(&params);
+                pdu.extend_from_slice(&data);
+                pdu
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn coherent_ack_never_panics(pdu in coherent_ack(), n in prop_oneof![1usize..=40, 1usize..=462], bit in any::<bool>()) {
+            let (wl, n) = if bit { (1, 1) } else { (2, n) };
+            match validate_read_response(&pdu, 1, wl, n) {
+                Ok(data) => prop_assert_eq!(data.len(), n),
+                Err(e) => prop_assert!(e.get_type().is_some_and(|k| kind::ALL.contains(&k))),
+            }
+            if let Err(e) = validate_write_response(&pdu, 1) {
+                prop_assert!(e.get_type().is_some_and(|k| kind::ALL.contains(&k)));
+            }
+        }
+
+        #[test]
+        fn read_transfer_never_panics_and_keeps_buffer_on_error(pdu in coherent_ack(), n in prop_oneof![1usize..=40, 1usize..=462]) {
+            let limits = PduLimits::new(480).unwrap();
+            let mut io = Scripted::pieces([data_frame(&pdu)]);
+            let mut reference = 0;
+            let mut progress = Progress::default();
+            let mut buffer = vec![0xaa; n];
+            let result = read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
+                &mut buffer, &mut progress, Duration::from_secs(1));
+            // n fits one chunk, so the response is a single frame whose payload ends the PDU.
+            prop_assert_eq!(progress.chunks, 1);
+            if result.is_ok() {
+                prop_assert_eq!(&buffer[..], &pdu[pdu.len() - n..]);
+                prop_assert_eq!(progress.confirmed, n);
+            } else {
+                prop_assert!(buffer.iter().all(|b| *b == 0xaa));
+                prop_assert_eq!(progress.confirmed, 0);
+            }
+        }
+
+        #[test]
+        fn read_transfer_copies_valid_payload_and_confirms_it(payload in vec(any::<u8>(), 1..=462)) {
+            let limits = PduLimits::new(480).unwrap();
+            let n = payload.len();
+            let mut io = Scripted::pieces([data_frame(&read_ack(1, &payload, false))]);
+            let mut reference = 0;
+            let mut progress = Progress::default();
+            let mut buffer = vec![0xaa; n];
+            read_transfer(&mut io, &limits, &mut reference, transfer(0, false),
+                &mut buffer, &mut progress, Duration::from_secs(1)).unwrap();
+            prop_assert_eq!(&buffer, &payload);
+            prop_assert_eq!((progress.chunks, progress.confirmed), (1, n));
+        }
+
+        #[test]
+        fn read_accepts_only_payload_of_requested_length(n in 1usize..=40, payload in vec(any::<u8>(), 0..=60)) {
+            let bits = (n * 8) as u16;
+            let mut item = vec![0xff, 4, (bits >> 8) as u8, bits as u8];
+            item.extend_from_slice(&payload);
+            let pdu = ack(1, 4, &item);
+            let result = validate_read_response(&pdu, 1, 2, n);
+            if payload.len() == n {
+                prop_assert_eq!(result.unwrap(), &payload[..]);
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
+    }
 }

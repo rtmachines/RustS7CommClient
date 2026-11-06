@@ -62,17 +62,19 @@ A very simplistic pseudo-code would be this:
 ```rust
 while !exit_request{
     
-    if !Client.connected {
-        let _ = client.connect_s71200_1500(ip_address);
+    if !client.connected {
+        if let Err(e) = client.connect_s71200_1500(ip_address) {
+            eprintln!("{e:#}");
+        }
     }
     
-    if Client.connected {
+    if client.connected {
         if !do_read_and_write() { // <-- returns false when severe error occurs
-            Client.disconnect();
+            client.disconnect();
         }
     }
 
-    thread::sleep(100);
+    thread::sleep(Duration::from_millis(100));
 }
 ```
 
@@ -132,7 +134,7 @@ separate lines; the chain is also available through `std::error::Error::source()
 chain; the schema is not guaranteed across `anyerror` versions. After conversion to `AnyError`, `io::ErrorKind`,
 `raw_os_error` and downcasting to `io::Error` are not available.
 
-Errors never imply a retry: multi-chunk writes are not atomic and writes are not retried automatically.
+Errors never imply a retry: writes are not atomic (also a single-chunk write or `write_bit`) and are not retried automatically.
 
 # API
 ---
@@ -214,7 +216,8 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 #### Parameters
 - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
 - `rd_timeout_ms` : Maximum time to receive one complete response frame (ms) (Default = 1000 ms)
-- `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
+- `wr_timeout_ms` : Socket send timeout for each request (ms) (Default = 500 ms);
+  the PLC acknowledgement of a write is bounded by `rd_timeout_ms`
 
 #### Returns
 `Ok(())` on success, or an `AnyError` on failure.
@@ -234,7 +237,7 @@ pub fn set_connection_port(&mut self, port: u16) -> rust7::Result<()>
 The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
 
 #### Parameters
-- `connection_type`: Connection type.
+- `port`: TCP connection port (1..=65535)
  
 #### Returns
 `Ok(())` on success, or an `AnyError` on failure.
@@ -317,11 +320,11 @@ changed it via `set_connection_port()`
 
 #### Errors
 - `rust7::kind::TCP_CONNECTION_FAILED`: the address resolves to no socket address.
-- `rust7::kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error.
+- `rust7::kind::IO`: name resolution, TCP connect (refused, timeout) or socket I/O error; a reply not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
 - `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection.
 - `rust7::kind::ISO_INVALID_HEADER` / `rust7::kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
-- `rust7::kind::ISO_CONNECTION_FAILED`: ISO connection failed
-- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed.
+- `rust7::kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
+- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a COTP framing error in the Setup Communication reply is the error's `source()`.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -365,15 +368,16 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
 - `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
 - `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
-- `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
+- `rust7::kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
+- `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
 
 ##### Connection after errors
 After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or `kind::ISO_FRAGMENTED_PACKET` the client disconnects itself (`connected` becomes `false`); reconnect before the next operation. PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) keep the connection.
   
 ##### High level
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 - `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
 - `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -381,11 +385,11 @@ After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::
 #### Notes
 - The number of bytes to read will be equal to the size of the buffer passed.
 - Large blocks are automatically split into chunks based on the negotiated PDU size.
-- In case of error the buffer contents will be inconsistent and should not be considered.
+- In case of error only `[0, confirmed)` of the buffer is a result.
  
 ---
 ```rust
-pub fn write_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, data: &[u8]) -> rust7::Result<()>
+pub fn write_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, buffer: &[u8]) -> rust7::Result<()>
 ```
  
 ### Writes a block of data to a specific S7 memory area.
@@ -421,21 +425,23 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 - `rust7::kind::ISO_INVALID_HEADER`: Invalid ISO Header
 - `rust7::kind::ISO_INVALID_TELEGRAM`: Inconsistent expected telegram length.
 - `rust7::kind::ISO_FRAGMENTED_PACKET`: ISO Packet fragmented.
-- `rust7::kind::IO`: network I/O error, including a response not received within the read timeout.
-- `rust7::kind::CONNECTION_CLOSED`: the PLC closed the connection.
+- `rust7::kind::IO`: network I/O error; a response not received within the read timeout reports `no complete response frame within <rd_timeout_ms> ms`.
+- `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection (end of stream while reading); a connection reset is reported as `kind::IO`.
 
 ##### Connection after errors
 After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM` or `kind::ISO_FRAGMENTED_PACKET` the client disconnects itself (`connected` becomes `false`); reconnect before the next operation. PLC errors (`kind::S7_NOT_FOUND`, `kind::S7_INVALID_ADDRESS`, `kind::S7_UNSPECIFIED`) keep the connection.
 
 ##### High level
+- `rust7::kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
 - `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
 - `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
 
 #### Notes
-- The number of bytes to write will be equal to the size of the buffer passed.
+- Byte access writes the entire buffer. Bit access sends one bit taken from the first buffer byte (true if != 0).
+- Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC; the chunk starting at `confirmed` may or may not have been written, also for a single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
 - Large blocks are automatically split into chunks based on the negotiated PDU size.
 - Writing the output buffer (`S7_AREA_PA`) usually does not produce useful results, in fact the output process image will be rewritten by OB1 in the next round
 
@@ -459,6 +465,7 @@ This helper method is same as `read_area()` with:
 
 #### Notes
 - The number of bytes to read will be equal to the size of the buffer passed.
+- On error only `[0, confirmed)` of the buffer is a result.
  
 For further info, please refer to `read_area()`
 
@@ -479,6 +486,7 @@ This helper method is same as `write_area()` with:
 
 #### Notes
 - The number of bytes to write will be equal to the size of the buffer passed.
+- Writes are not atomic. After an error, bytes `[0, confirmed)` were acknowledged by the PLC; the chunk starting at `confirmed` may or may not have been written, also for a single-chunk write or `write_bit`; later bytes were not sent. The client never retries a write.
  
 For further info, please refer to `write_area()`
 
@@ -548,7 +556,8 @@ To write **1** into DB10.DBX71.4 use:
 - Other reported by write_area()
 
 #### Notes
-- Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged. 
+- Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
+- After an error `confirmed` is 0 and the request may or may not have been applied by the PLC. The client never retries a write.
 
 For further info, please refer to `write_area()`
  
@@ -579,6 +588,15 @@ pub chunks:  usize
 Maybe you need to know it only for extreme tuning
 #### Note
 - Reset at the start of each read/write; on error it includes chunks already attempted, including the failing chunk.
+
+---
+```rust
+pub confirmed: usize
+```
+#### Buffer bytes confirmed in the last read or write
+Copied from verified responses (read) or acknowledged by the PLC (write). Reset together with `chunks`. `chunks == 0` means no request was sent.
+#### Note
+- For writes, after an error bytes `[0, confirmed)` were acknowledged, the chunk starting at `confirmed` may or may not have been written by the PLC (also for a single-chunk write or `write_bit`), and later bytes were not sent; for reads, only `[0, confirmed)` of the buffer is a result.
 
 
 ## Transfer validation and limits
@@ -623,8 +641,10 @@ usable. An `ACK` without an error or with extra parameters/data is a
 `kind::ISO_INVALID_TELEGRAM` error and disconnects the client. It never confirms a successful
 write. Successful reads and writes still require a validated `ACK_DATA` response.
 
-A multichunk write is not atomic: earlier chunks may have reached the PLC when a
-later chunk fails. No write is automatically retried. After a read error discard
-the destination buffer, since earlier chunks may have been copied. After a low-level
+A write is not atomic: after an error, bytes `[0, confirmed)` were acknowledged by the
+PLC, the chunk starting at `confirmed` may or may not have been written (also for a
+single-chunk write or `write_bit`), and later bytes were not sent. No write is
+automatically retried. After a read error only `[0, confirmed)` of the destination
+buffer is a result. After a low-level
 communication error the client disconnects itself; reconnect before the next operation. `chunks` records attempted chunks, including the
 failing attempt; parameter validation failures leave it zero.
