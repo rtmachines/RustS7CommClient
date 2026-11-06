@@ -7,7 +7,6 @@ Ten plik jest wspólnym źródłem instrukcji projektu; nie twórz kopii w CLAUD
 
 Uruchamiaj komendy z katalogu zawierającego główny Cargo.toml. Potrzebujesz
 toolchainu Rust obsługującego edition 2021, Cargo oraz komponentów rustfmt i clippy.
-Do nawigacji semantycznej używaj rust-analyzer przez LSP lub Serenę.
 
 | Cel | Komenda |
 | --- | --- |
@@ -24,42 +23,29 @@ Do nawigacji semantycznej używaj rust-analyzer przez LSP lub Serenę.
 Cargo obsługuje tutaj `--offline`; używaj go, gdy potrzebne zależności są lokalnie.
 Po zmianach Rust uruchom kontrolę formatowania, Clippy oraz testy. Dla zmian
 transportu uruchom również ignorowane testy TCP; wymagają dostępu do lokalnych
-gniazd. Zgłoś ograniczenia środowiska zamiast przedstawiać pominięty test jako sukces.
+gniazd, więc w sandboksie bez sieci mogą nie przejść z przyczyn środowiskowych.
 Po zmianach dokumentacji API sprawdź także generowanie dokumentacji.
 
-## Nawigacja: graf, Serena i LSP
+## Nawigacja
 
-- Najpierw zawęź zakres narzędziami code-review-graph, podając bezwzględny katalog
-  tego repozytorium jako `repo_root`. Brak grafu wymaga `build_or_update_graph_tool`.
-- Do wyszukiwania używaj `semantic_search_nodes_tool` lub `query_graph_tool`;
-  do przeglądu zmian `detect_changes_tool` i `get_review_context_tool`, a do wpływu
-  zmian `get_impact_radius_tool`, `get_affected_flows_tool` oraz `tests_for`.
-- Przed użyciem Sereny przeczytaj jej instrukcje inicjalne i aktywuj ten projekt
-  przez jego ścieżkę. Korzystaj z przeglądu symboli, wyszukiwania definicji
-  i referencji; odczytuj ciała tylko istotnych symboli.
-- Definicje, typy, implementacje traitów i referencje w Rust weryfikuj przez
-  rust-analyzer/LSP (także za pośrednictwem Sereny). Przy zmianie nazwy używaj
-  semantycznego rename i sprawdź wynikowy diff.
-- Graf i indeks LSP pomagają znaleźć kod; implementacja i testy rozstrzygają.
-  Pusty wynik nie dowodzi braku zależności. Gdy narzędzie jest niedostępne,
-  zgłoś to i użyj `rg` oraz odczytu źródeł, zachowując weryfikację przez Cargo.
+Narzędzia code-review-graph i reviewdog opisują instrukcje globalne użytkownika;
+tutaj obowiązuje tylko to, co specyficzne dla Rust. Definicje, implementacje
+traitów i referencje weryfikuj przez rust-analyzer/LSP (lub Serenę, jeśli jest
+dostępna — najpierw aktywuj w niej ten projekt). Zmiany nazw rób semantycznym
+rename i sprawdź wynikowy diff.
 
-## Reviewdog
+## Kontrakt błędów
 
-Zbieraj diagnostykę Clippy przez reviewdog podczas review i weryfikacji zmian Rust.
-Jeśli repozytorium otrzyma konfigurację reviewdog, używaj jej właściwych runnerów.
-Bez konfiguracji uruchom w Bash:
-
-```bash
-set -o pipefail
-cargo clippy --all-targets --message-format=short --color=never 2>&1 | reviewdog -f=clippy -reporter=local -filter-mode=nofilter -fail-level=warning
-```
-
-Przekazuj surowy output; przy przechwytywaniu Cargo przez RTK użyj
-`rtk bypass cargo` zamiast `cargo` w powyższym potoku. Zachowaj status błędu
-potoku i odróżnij awarię lintera od znalezionych problemów. Pusty raport
-filtrowany nie potwierdza poprawności całego projektu. Publikowanie raportów
-wymaga zlecenia użytkownika; domyślnie używaj reportera lokalnego.
+- Publiczne metody zwracają `rust7::Result<T>` z `AnyError`. Kategorie z modułu
+  `kind` w src/error.rs to stabilny kontrakt: używaj istniejących stałych, a nową
+  kategorię traktuj jako zmianę API (dopisz ją do `kind::ALL` i dokumentacji).
+- Każda publiczna metoda dodaje jeden kontekst: nazwę metody i parametry, nigdy
+  zawartość bufora.
+- Błąd, po którym strumień może być rozsynchronizowany (transport, ramkowanie),
+  musi rozłączyć klienta; błędy zgłoszone przez PLC zachowują połączenie. Opis
+  każdej stałej w `kind` mówi, która reguła ją obowiązuje.
+- Sygnatury publicznego API pilnuje tests/public_errors.rs. Zmiany zachowania
+  widoczne dla użytkownika biblioteki opisz w CHANGELOG.md, w sekcji niewydanej wersji.
 
 ## Ograniczenia projektu
 
