@@ -47,7 +47,7 @@ pub(super) fn negotiate<T: FrameRead + Write>(
     request[23..25].copy_from_slice(&requested_pdu.to_be_bytes());
     io.write_all(&request).map_err(error::io)?;
     let frame = read_tpkt(io, 487, timeout)?;
-    let pdu = data_payload(&frame).map_err(|_| error::pdu_negotiation_failed())?;
+    let pdu = data_payload(&frame).map_err(error::pdu_negotiation_failed_by)?;
     // One outstanding job in each direction was requested; all these fields
     // belong to the Setup Communication ACK_DATA, not to the negotiated size.
     if pdu.len() != 20 || pdu[..18] != [0x32, 3, 0, 0, 4, 0, 0, 8, 0, 0, 0, 0, 0xf0, 0, 0, 1, 0, 1]
@@ -195,13 +195,13 @@ fn ack_data(pdu: &[u8], reference: u16, function: u8) -> Result<&[u8]> {
         // Only a header-only error ACK completes the job. An empty success ACK
         // does not confirm that a read or write was performed.
         return if params == 0 && data == 0 && pdu[10..12] != [0, 0] {
-            Err(error::s7_unspecified())
+            Err(error::s7_header_error(pdu[10], pdu[11]))
         } else {
             Err(error::iso_invalid_telegram())
         };
     }
     if pdu[10..12] != [0, 0] {
-        return Err(error::s7_unspecified());
+        return Err(error::s7_header_error(pdu[10], pdu[11]));
     }
     if params != 2 || pdu.len() < 14 || pdu[12..14] != [function, 1] {
         return Err(error::iso_invalid_telegram());
@@ -214,7 +214,7 @@ fn item_status(status: u8) -> Result<()> {
         0xff => Ok(()),
         5 => Err(error::s7_invalid_address()),
         10 => Err(error::s7_not_found()),
-        _ => Err(error::s7_unspecified()),
+        code => Err(error::s7_item_error(code)),
     }
 }
 

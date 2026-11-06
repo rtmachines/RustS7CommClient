@@ -321,7 +321,7 @@ changed it via `set_connection_port()`
 - `rust7::kind::CONNECTION_CLOSED`: the peer closed the connection.
 - `rust7::kind::ISO_INVALID_HEADER` / `rust7::kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
 - `rust7::kind::ISO_CONNECTION_FAILED`: ISO connection failed
-- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed.
+- `rust7::kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed; a framing error in the reply is the error's `source()`.
 
 Example of using TSAPs (from Snap7 manual)
 ![tsap](img/tsap.png)
@@ -373,7 +373,7 @@ After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::
   
 ##### High level
 - `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC; the message carries the S7 error class and code, or the item return code.
 - `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -429,7 +429,7 @@ After `kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::
 
 ##### High level
 - `rust7::kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC.
+- `rust7::kind::S7_UNSPECIFIED`: Other error reported by the PLC; the message carries the S7 error class and code, or the item return code.
 - `rust7::kind::S7_INVALID_ADDRESS`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.

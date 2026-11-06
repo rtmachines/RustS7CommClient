@@ -191,6 +191,27 @@ fn negotiation_response(length: u16) -> Vec<u8> {
 }
 
 #[test]
+fn negotiation_keeps_framing_error_as_source() {
+    use std::error::Error as _;
+    for (index, cause) in [
+        (5, kind::ISO_INVALID_HEADER),
+        (6, kind::ISO_FRAGMENTED_PACKET),
+    ] {
+        let mut bad = negotiation_response(480);
+        bad[index] = 0;
+        let mut io = Scripted::pieces([bad]);
+        let err = negotiate(&mut io, 1024, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(err.get_type(), Some(kind::PDU_NEGOTIATION_FAILED));
+        assert_eq!(
+            err.source()
+                .and_then(|s| s.downcast_ref::<AnyError>())
+                .and_then(|s| s.get_type()),
+            Some(cause)
+        );
+    }
+}
+
+#[test]
 fn pdu_limits_reject_invalid_sizes() {
     for n in [0, 1, 18, 27, 28, 481, 65535] {
         assert_kind(&PduLimits::new(n), kind::PDU_NEGOTIATION_FAILED);
@@ -373,11 +394,13 @@ fn terminal_error_ack_reports_plc_error() {
     for error in [[0x81, 4], [0x81, 0], [0, 4]] {
         let mut pdu = error_ack(0x1234);
         pdu[10..12].copy_from_slice(&error);
-        assert_kind(
-            &validate_read_response(&pdu, 0x1234, 2, 4),
-            kind::S7_UNSPECIFIED,
-        );
-        assert_kind(&validate_write_response(&pdu, 0x1234), kind::S7_UNSPECIFIED);
+        let expected = format!("(error class {:#04x}, code {:#04x})", error[0], error[1]);
+        let read = validate_read_response(&pdu, 0x1234, 2, 4);
+        let write = validate_write_response(&pdu, 0x1234);
+        assert_kind(&read, kind::S7_UNSPECIFIED);
+        assert_kind(&write, kind::S7_UNSPECIFIED);
+        assert!(read.unwrap_err().to_string().contains(&expected));
+        assert!(write.unwrap_err().to_string().contains(&expected));
     }
 }
 
@@ -602,6 +625,9 @@ fn response_preserves_plc_errors() {
                     | ("missing", Some(kind::S7_NOT_FOUND))
                     | ("other", Some(kind::S7_UNSPECIFIED))
             ));
+            if expected == "other" {
+                assert!(err.to_string().contains("(item return code 0x07)"), "{err}");
+            }
         }
     }
 }

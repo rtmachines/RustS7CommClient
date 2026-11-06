@@ -6,7 +6,7 @@ use std::fmt;
 #[test]
 fn constructors_set_known_kind() {
     type Case = (fn() -> AnyError, &'static str, &'static str);
-    let table: [Case; 12] = [
+    let table: [Case; 11] = [
         (not_connected, kind::NOT_CONNECTED, "Not connected"),
         (
             tcp_connection_failed,
@@ -58,7 +58,6 @@ fn constructors_set_known_kind() {
             kind::S7_INVALID_ADDRESS,
             "S7 Invalid address",
         ),
-        (s7_unspecified, kind::S7_UNSPECIFIED, "S7 unspecified error"),
     ];
     for (make, expected, msg) in table {
         let err = make();
@@ -72,6 +71,45 @@ fn constructors_set_known_kind() {
         Some(kind::IO)
     );
     assert_eq!(kind::ALL.len(), 13);
+}
+
+#[test]
+fn s7_error_messages_carry_codes() {
+    let table = [
+        (
+            s7_header_error(0x81, 4),
+            "rust7::S7Unspecified: S7 unspecified error (error class 0x81, code 0x04)",
+        ),
+        (
+            s7_header_error(0, 4),
+            "rust7::S7Unspecified: S7 unspecified error (error class 0x00, code 0x04)",
+        ),
+        (
+            s7_item_error(3),
+            "rust7::S7Unspecified: S7 unspecified error (item return code 0x03)",
+        ),
+    ];
+    for (err, expected) in table {
+        assert_eq!(err.get_type(), Some(kind::S7_UNSPECIFIED));
+        assert_eq!(err.to_string(), expected);
+        assert!(err.source().is_none());
+    }
+}
+
+#[test]
+fn negotiation_failure_keeps_cause() {
+    let e = pdu_negotiation_failed_by(iso_fragmented_packet());
+    assert_eq!(e.get_type(), Some(kind::PDU_NEGOTIATION_FAILED));
+    assert_eq!(
+        e.source()
+            .and_then(|s| s.downcast_ref::<AnyError>())
+            .and_then(|s| s.get_type()),
+        Some(kind::ISO_FRAGMENTED_PACKET)
+    );
+    assert_eq!(
+        e.to_string(),
+        "rust7::PduNegotiationFailed: S7 PDU negotiation failed; source: rust7::IsoFragmentedPacket: Fragmented ISO Packet"
+    );
 }
 
 #[test]

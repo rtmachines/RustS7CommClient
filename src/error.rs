@@ -123,6 +123,33 @@ pub(crate) fn pdu_negotiation_failed() -> AnyError {
     domain(kind::PDU_NEGOTIATION_FAILED, "S7 PDU negotiation failed")
 }
 
+/// Carrier that exposes `source` through `Error::source`.
+#[derive(Debug)]
+struct Caused {
+    msg: &'static str,
+    source: AnyError,
+}
+
+impl std::fmt::Display for Caused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.msg)
+    }
+}
+
+impl std::error::Error for Caused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+pub(crate) fn pdu_negotiation_failed_by(source: AnyError) -> AnyError {
+    let caused = Caused {
+        msg: "S7 PDU negotiation failed",
+        source,
+    };
+    AnyError::new(&caused).with_type(Some(kind::PDU_NEGOTIATION_FAILED))
+}
+
 pub(crate) fn invalid_fun_parameter() -> AnyError {
     domain(
         kind::INVALID_FUN_PARAMETER,
@@ -138,8 +165,18 @@ pub(crate) fn s7_invalid_address() -> AnyError {
     domain(kind::S7_INVALID_ADDRESS, "S7 Invalid address")
 }
 
-pub(crate) fn s7_unspecified() -> AnyError {
-    domain(kind::S7_UNSPECIFIED, "S7 unspecified error")
+pub(crate) fn s7_header_error(class: u8, code: u8) -> AnyError {
+    AnyError::error(format!(
+        "S7 unspecified error (error class {class:#04x}, code {code:#04x})"
+    ))
+    .with_type(Some(kind::S7_UNSPECIFIED))
+}
+
+pub(crate) fn s7_item_error(code: u8) -> AnyError {
+    AnyError::error(format!(
+        "S7 unspecified error (item return code {code:#04x})"
+    ))
+    .with_type(Some(kind::S7_UNSPECIFIED))
 }
 
 /// Whether the error leaves the connection in an unusable state.

@@ -298,7 +298,7 @@ impl S7Client {
     /// - `kind::CONNECTION_CLOSED`: the peer closed the connection.
     /// - `kind::ISO_INVALID_HEADER` / `kind::ISO_INVALID_TELEGRAM`: malformed or oversized TPKT reply.
     /// - `kind::ISO_CONNECTION_FAILED`: ISO connection failed, including an invalid TPDU size option.
-    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size.
+    /// - `kind::PDU_NEGOTIATION_FAILED`: PDU negotiation failed or the CPU exceeded the offered size; a framing error in the reply is the error's `source()`.
     ///
     /// ### Negotiated limits
     /// The S7 offer is at most 480 bytes and fits in one COTP TPDU, including its
@@ -450,7 +450,7 @@ impl S7Client {
     /// #### High level
     /// - `kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
     /// - `kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`.
+    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
     /// - `kind::S7_INVALID_ADDRESS`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
@@ -561,7 +561,7 @@ impl S7Client {
     /// #### High level
     /// - `kind::INVALID_FUN_PARAMETER`: Invalid parameter supplied to the function.
     /// - `kind::S7_NOT_FOUND`: The resource was not found (e.g. Inexistent DB).
-    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`.
+    /// - `kind::S7_UNSPECIFIED`: Other error reported by the PLC, including a terminal error `ACK`; the message carries the S7 error class and code, or the item return code.
     /// - `kind::S7_INVALID_ADDRESS`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.

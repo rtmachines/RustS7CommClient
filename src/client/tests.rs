@@ -94,7 +94,8 @@ fn only_transport_errors_break_the_session() {
     for e in [
         error::s7_invalid_address(),
         error::s7_not_found(),
-        error::s7_unspecified(),
+        error::s7_header_error(0x81, 4),
+        error::s7_item_error(3),
         error::invalid_fun_parameter(),
         error::not_connected(),
     ] {
