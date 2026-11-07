@@ -79,6 +79,15 @@ fn shortcuts_have_single_context() {
         ["write_bit area=0x84 db=1 byte_num=2 bit_idx=3"]
     );
 
+    let err = client
+        .write_bit(rust7::S7_AREA_DB, 1, 2, 8, true)
+        .unwrap_err();
+    assert_eq!(err.get_type(), Some(rust7::kind::INVALID_FUN_PARAMETER));
+    assert_eq!(
+        contexts(&err),
+        ["write_bit area=0x84 db=1 byte_num=2 bit_idx=8"]
+    );
+
     let err = client.connect_rack_slot("127.0.0.1", 8, 0).unwrap_err();
     assert_eq!(err.get_type(), Some(rust7::kind::INVALID_FUN_PARAMETER));
     assert_eq!(
@@ -280,6 +289,12 @@ mod async_api {
         assert_eq!(
             contexts(&err),
             ["write_bit area=0x84 db=1 byte_num=2 bit_idx=3"]
+        );
+        let err = c.write_bit(S7_AREA_DB, 1, 2, 8, true).await.unwrap_err();
+        assert_eq!(err.get_type(), Some(INVALID_FUN_PARAMETER));
+        assert_eq!(
+            contexts(&err),
+            ["write_bit area=0x84 db=1 byte_num=2 bit_idx=8"]
         );
         let err = c.connect_rack_slot("127.0.0.1", 8, 0).await.unwrap_err();
         assert_eq!(err.get_type(), Some(INVALID_FUN_PARAMETER));

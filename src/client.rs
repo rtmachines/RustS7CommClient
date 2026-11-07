@@ -20,7 +20,7 @@ mod shared;
 #[cfg(feature = "tokio")]
 pub use async_client::AsyncS7Client;
 
-use shared::ctx;
+use shared::{ctx, Session};
 
 #[cfg(test)]
 mod tests;
@@ -41,13 +41,12 @@ pub const S7_WL_BIT: u8 = 0x01;
 pub const S7_WL_BYTE: u8 = 0x02;
 
 pub struct S7Client {
-    stream: Option<TcpStream>,
+    session: Option<Session<TcpStream>>,
     port: u16,
     co_timeout_ms: u64,
     rd_timeout_ms: u64,
     wr_timeout_ms: u64,
     conn_type: u16,
-    limits: Option<protocol::PduLimits>,
     reference: u16,
     /// S7 PDU length negotiated by the CPU, excluding COTP (diagnostic value).
     /// Changing this field does not change the internal negotiated limits.
@@ -80,13 +79,12 @@ impl S7Client {
     ///
     pub fn new() -> Self {
         S7Client {
-            stream: None,
+            session: None,
             port: 102,
             co_timeout_ms: 3000,
             rd_timeout_ms: 1000,
             wr_timeout_ms: 500,
             conn_type: CT_PG,
-            limits: None,
             reference: 0,
             pdu_length: 0x0000,
             connected: false,
@@ -332,10 +330,9 @@ impl S7Client {
 
         let limits = protocol::negotiate(&mut stream, tpdu_limit, rd_timeout)?;
         self.pdu_length = limits.pdu_length;
-        self.limits = Some(limits);
         self.reference = 0;
 
-        self.stream = Some(stream);
+        self.session = Some(Session { stream, limits });
         self.connected = true;
         self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -352,10 +349,9 @@ impl S7Client {
     /// `write_area()`); calling this again is harmless.
     ///
     pub fn disconnect(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
+        if let Some(session) = self.session.take() {
+            let _ = session.stream.shutdown(Shutdown::Both);
         }
-        self.limits = None;
         self.connected = false;
         self.pdu_length = 0;
     }
@@ -439,16 +435,15 @@ impl S7Client {
         self.confirmed = 0;
         self.check_area(transfer.area)?;
         protocol::validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
-        if !self.connected {
-            return Err(error::not_connected());
-        }
-        let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
-        let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
+        let session = match self.session.as_mut() {
+            Some(session) if self.connected => session,
+            _ => return Err(error::not_connected()),
+        };
         let time = Instant::now();
         let mut progress = protocol::Progress::default();
         let result = protocol::read_transfer(
-            stream,
-            limits,
+            &mut session.stream,
+            &session.limits,
             &mut self.reference,
             transfer,
             buffer,
@@ -543,16 +538,15 @@ impl S7Client {
         self.confirmed = 0;
         self.check_area(transfer.area)?;
         protocol::validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
-        if !self.connected {
-            return Err(error::not_connected());
-        }
-        let limits = self.limits.as_ref().ok_or_else(error::not_connected)?;
-        let stream = self.stream.as_mut().ok_or_else(error::not_connected)?;
+        let session = match self.session.as_mut() {
+            Some(session) if self.connected => session,
+            _ => return Err(error::not_connected()),
+        };
         let time = Instant::now();
         let mut progress = protocol::Progress::default();
         let result = protocol::write_transfer(
-            stream,
-            limits,
+            &mut session.stream,
+            &session.limits,
             &mut self.reference,
             transfer,
             buffer,

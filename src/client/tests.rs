@@ -73,8 +73,7 @@ fn public_status_fields_cannot_create_a_connection() {
     assert_kind(&client.write_db(1, 0, &[0]), kind::NOT_CONNECTED);
     client.disconnect();
     assert!(!client.connected);
-    assert!(client.stream.is_none());
-    assert!(client.limits.is_none());
+    assert!(client.session.is_none());
 }
 
 #[test]
@@ -86,7 +85,7 @@ fn invalid_rack_or_slot_is_rejected_before_connecting() {
             kind::INVALID_FUN_PARAMETER,
         );
     }
-    assert!(!client.connected && client.stream.is_none());
+    assert!(!client.connected && client.session.is_none());
 }
 
 #[test]
@@ -119,7 +118,6 @@ fn finish_preserves_session_only_for_valid_error_ack() {
             let mut client = S7Client::new();
             client.connected = true;
             client.pdu_length = 125;
-            client.limits = Some(protocol::PduLimits::new(125).unwrap());
             let mut pdu = [0x32, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0x81, 4];
             if malformed {
                 pdu[5] = 2; // A PLC error with the wrong reference is a framing error.
@@ -133,12 +131,10 @@ fn finish_preserves_session_only_for_valid_error_ack() {
             if malformed {
                 assert_eq!(error.get_type(), Some(kind::ISO_INVALID_TELEGRAM));
                 assert!(!client.connected);
-                assert!(client.limits.is_none());
                 assert_eq!(client.pdu_length, 0);
             } else {
                 assert_eq!(error.get_type(), Some(kind::S7_UNSPECIFIED));
                 assert!(client.connected);
-                assert_eq!(client.limits.unwrap().pdu_length, 125);
                 assert_eq!(client.pdu_length, 125);
             }
         }
@@ -196,7 +192,6 @@ fn finish_applies_the_session_rule_of_every_kind() {
         let mut client = S7Client::new();
         client.connected = true;
         client.pdu_length = 125;
-        client.limits = Some(protocol::PduLimits::new(125).unwrap());
         client
     };
     for (expected, err, breaks) in table {
@@ -205,11 +200,9 @@ fn finish_applies_the_session_rule_of_every_kind() {
         assert_eq!(e.get_type(), Some(expected));
         if breaks {
             assert!(!client.connected, "{expected} must disconnect");
-            assert!(client.limits.is_none());
             assert_eq!(client.pdu_length, 0);
         } else {
             assert!(client.connected, "{expected} must keep the session");
-            assert!(client.limits.is_some());
             assert_eq!(client.pdu_length, 125);
         }
     }
@@ -220,7 +213,6 @@ fn finish_applies_the_session_rule_of_every_kind() {
         let mut client = connected_client();
         client.finish(Err(err), Instant::now()).unwrap_err();
         assert!(!client.connected);
-        assert!(client.limits.is_none());
         assert_eq!(client.pdu_length, 0);
     }
 }
@@ -230,12 +222,10 @@ fn invalid_area_keeps_active_session() {
     let mut client = S7Client::new();
     client.connected = true;
     client.pdu_length = 125;
-    client.limits = Some(protocol::PduLimits::new(125).unwrap());
     let result = client.read_area(0x99, 1, 0, S7_WL_BYTE, &mut [0; 2]);
     assert_kind(&result, kind::INVALID_FUN_PARAMETER);
     assert!(client.connected);
     assert_eq!(client.pdu_length, 125);
-    assert!(client.limits.is_some());
 }
 
 #[test]
@@ -251,7 +241,7 @@ fn default_client_has_documented_settings() {
         (3000, 1000, 500)
     );
     assert_eq!(client.conn_type, CT_PG);
-    assert!(!client.connected && client.stream.is_none() && client.limits.is_none());
+    assert!(!client.connected && client.session.is_none());
     assert_eq!(
         (
             client.pdu_length,
@@ -323,13 +313,11 @@ fn invalid_write_area_keeps_active_session() {
     let mut client = S7Client::new();
     client.connected = true;
     client.pdu_length = 125;
-    client.limits = Some(protocol::PduLimits::new(125).unwrap());
     for area in [0x80, 0x85] {
         let result = client.write_area(area, 1, 0, S7_WL_BYTE, &[0; 2]);
         assert_kind(&result, kind::INVALID_FUN_PARAMETER);
         assert!(client.connected);
         assert_eq!(client.pdu_length, 125);
-        assert!(client.limits.is_some());
     }
 }
 
