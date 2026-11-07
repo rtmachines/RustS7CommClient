@@ -684,7 +684,10 @@ fn requests(io: &Scripted) -> Vec<Vec<u8>> {
     let mut cursor = Cursor::new(&io.writes);
     let mut result = Vec::new();
     while cursor.position() < io.writes.len() as u64 {
+        let before = cursor.position();
         result.push(read_tpkt(&mut cursor, 487, Duration::from_secs(1)).unwrap());
+        // Without progress this loop would grow `result` until memory runs out.
+        assert!(cursor.position() > before, "read_tpkt consumed no input");
     }
     result
 }
