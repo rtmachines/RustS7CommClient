@@ -77,6 +77,23 @@ enum Scenario {
     AckError(bool),
     MalformedAck(bool),
     MidFrameClose,
+    S7300,
+    Tsap,
+    Slow,
+    SlowDrip,
+}
+
+/// Server delay in the `Slow` scenario, before the connection confirm and every reply.
+const SLOW: Duration = Duration::from_millis(50);
+
+/// `last_time` is in milliseconds and spans the job, including the server's delay.
+#[track_caller]
+fn assert_job_time(last_time: f64, start: Instant) {
+    let measured = start.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        last_time >= SLOW.as_secs_f64() * 1000.0 && last_time <= measured,
+        "last_time {last_time} ms, measured {measured} ms"
+    );
 }
 
 fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
@@ -86,6 +103,15 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     let cr = frame(&mut stream)?;
     assert_eq!(&cr[4..11], &[17, 0xe0, 0, 0, 0, 1, 0]);
     assert_eq!(&cr[11..14], &[0xc0, 1, 10]);
+    let [local_hi, local_lo, remote_hi, remote_lo] = match scenario {
+        Scenario::Tsap => [0x10, 0x00, 0x03, 0x01],
+        Scenario::S7300 => [1, 0, 1, 2],
+        _ => [1, 0, 1, 0],
+    };
+    assert_eq!(
+        &cr[14..22],
+        &[0xc1, 2, local_hi, local_lo, 0xc2, 2, remote_hi, remote_lo]
+    );
     let exponent = match scenario {
         Scenario::SmallTpdu(exponent) | Scenario::OversizedPdu(exponent) => exponent,
         Scenario::BadCotp => 11,
@@ -95,6 +121,9 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     let cc = [
         3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, exponent, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
     ];
+    if scenario == Scenario::Slow {
+        thread::sleep(SLOW);
+    }
     send_split(&mut stream, &cc)?;
     if scenario == Scenario::BadCotp {
         assert!(matches!(frame(&mut stream), Err(e) if e.kind() == io::ErrorKind::UnexpectedEof));
@@ -184,6 +213,15 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             send_split(&mut stream, &response)?;
             continue;
         }
+        if scenario == Scenario::SlowDrip {
+            // One byte arrives late but before the deadline, then nothing more.
+            let response = reply(&request[11..13], 4, &[0xff, 4, 0, 32, 0, 0, 0, 0]);
+            stream.write_all(&response[..7])?;
+            thread::sleep(Duration::from_millis(400));
+            stream.write_all(&response[7..8])?;
+            let _ = stream.read(&mut [0; 1]); // Wait until the client gives up.
+            return Ok(());
+        }
         if matches!(scenario, Scenario::LateReply(_)) {
             // Reply after the client's read timeout; the client is gone by then.
             let data: &[u8] = if request[17] == 5 {
@@ -223,6 +261,9 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             }
             _ => panic!("unexpected request"),
         };
+        if scenario == Scenario::Slow {
+            thread::sleep(SLOW);
+        }
         let response = reply(&request[11..13], request[17], &data);
         assert!(response.len() - 4 <= tpdu_limit);
         send_split(&mut stream, &response)?;
@@ -254,7 +295,15 @@ fn run(scenario: Scenario) {
         if matches!(scenario, Scenario::LateReply(_)) {
             client.set_timeout(1000, 200, 1000).unwrap();
         }
-        let result = client.connect_s71200_1500("127.0.0.1");
+        if scenario == Scenario::SlowDrip {
+            client.set_timeout(1000, 500, 1000).unwrap();
+        }
+        let start = Instant::now();
+        let result = match scenario {
+            Scenario::S7300 => client.connect_s7300("127.0.0.1"),
+            Scenario::Tsap => client.connect_tsap("127.0.0.1", 0x1000, 0x0301),
+            _ => client.connect_s71200_1500("127.0.0.1"),
+        };
         if matches!(
             scenario,
             Scenario::BadPdu | Scenario::OversizedPdu(_) | Scenario::BadCotp
@@ -321,6 +370,31 @@ fn run(scenario: Scenario) {
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut [0; 4]), kind::NOT_CONNECTED);
+        } else if matches!(scenario, Scenario::S7300 | Scenario::Tsap) {
+            result.unwrap();
+            assert!(client.connected);
+            assert_eq!(client.pdu_length, 240);
+            let mut buffer = [0; 4];
+            client.read_db(100, 0, &mut buffer).unwrap();
+            assert_eq!(buffer, [0, 1, 2, 3]);
+        } else if scenario == Scenario::Slow {
+            result.unwrap();
+            assert_job_time(client.last_time, start);
+            let start = Instant::now();
+            client.read_db(100, 0, &mut [0; 4]).unwrap();
+            assert_job_time(client.last_time, start);
+            let start = Instant::now();
+            client.write_db(100, 0, &[1, 2, 3, 4]).unwrap();
+            assert_job_time(client.last_time, start);
+        } else if scenario == Scenario::SlowDrip {
+            result.unwrap();
+            let start = Instant::now();
+            let result = client.read_db(100, 0, &mut [0; 4]);
+            let elapsed = start.elapsed();
+            assert_kind(&result, kind::IO);
+            // The late byte must not restart the full read timeout.
+            assert!(elapsed < Duration::from_millis(700), "{elapsed:?}");
+            assert!(!client.connected);
         } else if scenario == Scenario::PlcError {
             result.unwrap();
             let mut buffer = [0; 4];
@@ -435,4 +509,24 @@ fn malformed_ack_disconnects_client() {
 #[ignore = "requires permission to open loopback sockets"]
 fn mid_frame_close_disconnects_client() {
     run(Scenario::MidFrameClose);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn connect_helpers_send_their_tsaps() {
+    for scenario in [Scenario::S7300, Scenario::Tsap] {
+        run(scenario);
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn last_time_reports_job_duration_in_milliseconds() {
+    run(Scenario::Slow);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn trickling_reply_is_bounded_by_the_frame_deadline() {
+    run(Scenario::SlowDrip);
 }
