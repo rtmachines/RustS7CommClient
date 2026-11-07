@@ -10,3 +10,5 @@ rust7 = "0.1.2"
 [[bin]]
 name = "docker"
 path = "main.rs"
+
+[workspace]
