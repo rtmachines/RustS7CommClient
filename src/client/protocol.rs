@@ -261,11 +261,44 @@ pub(super) fn next_reference(counter: &mut u16) -> u16 {
     *counter
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Transfer {
     pub(super) area: u8,
     pub(super) db_number: u16,
     pub(super) start: u32,
     pub(super) wordlen: u8,
+}
+
+impl Transfer {
+    pub(super) fn area(area: u8, db_number: u16, start: u16, wordlen: u8) -> Self {
+        Self {
+            area,
+            db_number,
+            start: u32::from(start),
+            wordlen,
+        }
+    }
+
+    pub(super) fn db(db_number: u16, start: u16) -> Self {
+        Self::area(super::S7_AREA_DB, db_number, start, super::S7_WL_BYTE)
+    }
+
+    pub(super) fn bit(area: u8, db_number: u16, byte_num: u16, bit_idx: u8) -> Result<Self> {
+        Ok(Self {
+            area,
+            db_number,
+            start: bit_start(byte_num, bit_idx)?,
+            wordlen: super::S7_WL_BIT,
+        })
+    }
+}
+
+pub(super) fn bit_payload(value: bool) -> [u8; 1] {
+    [u8::from(value)]
+}
+
+pub(super) fn bit_value(byte: u8) -> bool {
+    byte != 0
 }
 
 pub(super) fn bit_start(byte_num: u16, bit_idx: u8) -> Result<u32> {

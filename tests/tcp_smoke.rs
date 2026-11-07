@@ -1,5 +1,8 @@
 //! Run explicitly: cargo test --test tcp_smoke -- --ignored
-use rust7::{kind, S7Client, CT_OP, CT_S7, S7_AREA_DB};
+use rust7::{
+    kind, S7Client, CT_OP, CT_S7, S7_AREA_DB, S7_AREA_MK, S7_AREA_PA, S7_AREA_PE, S7_WL_BIT,
+    S7_WL_BYTE,
+};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
@@ -92,6 +95,8 @@ enum Scenario {
     PlcError,
     AckError(bool),
     MalformedAck(bool),
+    BadHeader(bool),
+    Fragment(bool),
     MidFrameClose,
     S7300,
     Tsap,
@@ -102,6 +107,7 @@ enum Scenario {
     Dropped,
     Slow,
     SlowDrip,
+    Addressing,
 }
 
 /// Server delay in the `Slow` scenario, before the connection confirm and every reply.
@@ -117,7 +123,28 @@ fn assert_job_time(last_time: f64, start: Instant) {
     );
 }
 
-fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
+/// One read or write request as the mock PLC decoded it.
+#[derive(Debug, PartialEq)]
+struct Seen {
+    function: u8,
+    wordlen: u8,
+    db: u16,
+    area: u8,
+    address: u32,
+    payload: Vec<u8>,
+}
+
+fn serve(stream: TcpStream, scenario: Scenario) -> io::Result<Vec<Seen>> {
+    let mut seen = Vec::new();
+    serve_requests(stream, scenario, &mut seen)?;
+    Ok(seen)
+}
+
+fn serve_requests(
+    mut stream: TcpStream,
+    scenario: Scenario,
+    seen: &mut Vec<Seen>,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_nodelay(true)?;
@@ -191,14 +218,29 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         };
         reference = reference.wrapping_add(1);
         assert_eq!(&request[11..13], &reference.to_be_bytes());
-        assert!(request.len() - 4 <= tpdu_limit);
         let count = usize::from(u16::from_be_bytes([request[23], request[24]]));
+        assert_eq!(&request[4..11], &[2, 0xf0, 0x80, 0x32, 1, 0, 0]);
+        assert_eq!(&request[13..15], &[0, 14]);
+        assert_eq!(&request[18..22], &[1, 0x12, 0x0a, 0x10]);
+        if request[17] == 4 {
+            assert_eq!(&request[15..17], &[0, 0]);
+        } else {
+            let bit = request[22] == 1;
+            assert_eq!(&request[15..17], &((count + 4) as u16).to_be_bytes());
+            assert_eq!(request[31], 0);
+            assert_eq!(request[32], if bit { 3 } else { 4 });
+            let bits = if bit { 1 } else { count * 8 } as u16;
+            assert_eq!(&request[33..35], &bits.to_be_bytes());
+        }
+        assert!(request.len() - 4 <= tpdu_limit);
         if request[17] == 4 {
             assert!(3 + 18 + count <= tpdu_limit);
         }
         let address = u32::from_be_bytes([0, request[28], request[29], request[30]]);
         if request[22] == 1 {
-            assert_eq!(address, 0x07ffff);
+            if scenario != Scenario::Addressing {
+                assert_eq!(address, 0x07ffff);
+            }
             assert_eq!(count, 1);
         }
         let first = reference == 1;
@@ -262,6 +304,18 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
             let _ = send_split(&mut stream, &reply(&request[11..13], request[17], data));
             return Ok(());
         }
+        seen.push(Seen {
+            function: request[17],
+            wordlen: request[22],
+            db: u16::from_be_bytes([request[25], request[26]]),
+            area: request[27],
+            address,
+            payload: if request[17] == 5 {
+                request[35..].to_vec()
+            } else {
+                Vec::new()
+            },
+        });
         let data = match (request[17], request[22]) {
             (4, 2) if first && scenario == Scenario::PlcError => vec![5, 0, 0, 0],
             (4, 2) => {
@@ -271,7 +325,9 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
                 data
             }
             (5, 2) => {
-                assert_eq!(address as usize / 8, written.len());
+                if scenario != Scenario::Addressing {
+                    assert_eq!(address as usize / 8, written.len());
+                }
                 written.extend_from_slice(&request[35..]);
                 assert_eq!(written.len().min(65536), written.len());
                 if written.len() == 65536 {
@@ -282,9 +338,11 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
                 }
                 vec![0xff]
             }
-            (4, 1) => vec![0xff, 3, 0, 1, 1],
+            (4, 1) => vec![0xff, 3, 0, 1, (address % 2) as u8],
             (5, 1) => {
-                assert_eq!(&request[35..], &[1]);
+                if scenario != Scenario::Addressing {
+                    assert_eq!(&request[35..], &[1]);
+                }
                 vec![0xff]
             }
             _ => panic!("unexpected request"),
@@ -292,13 +350,26 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         if scenario == Scenario::Slow {
             thread::sleep(SLOW);
         }
-        let response = reply(&request[11..13], request[17], &data);
+        let mut response = reply(&request[11..13], request[17], &data);
         assert!(response.len() - 4 <= tpdu_limit);
+        if first {
+            match scenario {
+                Scenario::BadHeader(_) => {
+                    // The client drops the connection with unread bytes, so the
+                    // reply may meet an RST; ignore the write result.
+                    response[0] = 2;
+                    let _ = send_split(&mut stream, &response);
+                    return Ok(());
+                }
+                Scenario::Fragment(_) => response[6] = 0,
+                _ => {}
+            }
+        }
         send_split(&mut stream, &response)?;
     }
 }
 
-fn run(scenario: Scenario) {
+fn run(scenario: Scenario) -> Vec<Seen> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback sockets required");
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
@@ -348,7 +419,11 @@ fn run(scenario: Scenario) {
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut [0]), kind::NOT_CONNECTED);
-        } else if let Scenario::AckError(writing) | Scenario::MalformedAck(writing) = scenario {
+        } else if let Scenario::AckError(writing)
+        | Scenario::MalformedAck(writing)
+        | Scenario::BadHeader(writing)
+        | Scenario::Fragment(writing) = scenario
+        {
             result.unwrap();
             let mut buffer = [0xaa; 600];
             let result = if writing {
@@ -360,8 +435,16 @@ fn run(scenario: Scenario) {
             assert_eq!(client.chunks, 1);
             assert_eq!(client.confirmed, 0);
             assert_eq!(client.last_time, 0.0);
-            if matches!(scenario, Scenario::MalformedAck(_)) {
-                assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+            if matches!(
+                scenario,
+                Scenario::MalformedAck(_) | Scenario::BadHeader(_) | Scenario::Fragment(_)
+            ) {
+                let expected = match scenario {
+                    Scenario::BadHeader(_) => kind::ISO_INVALID_HEADER,
+                    Scenario::Fragment(_) => kind::ISO_FRAGMENTED_PACKET,
+                    _ => kind::ISO_INVALID_TELEGRAM,
+                };
+                assert_kind(&result, expected);
                 assert!(!client.connected);
                 assert_eq!(client.pdu_length, 0);
                 assert_kind(&client.write_db(100, 0, &[1]), kind::NOT_CONNECTED);
@@ -425,8 +508,7 @@ fn run(scenario: Scenario) {
             result.unwrap();
             drop(client);
             // The server returns only once it reads end of stream (2 s read timeout otherwise).
-            server.join().unwrap().unwrap();
-            return;
+            return server.join().unwrap().unwrap();
         } else if matches!(
             scenario,
             Scenario::S7300 | Scenario::Tsap | Scenario::RackSlot(..)
@@ -455,6 +537,26 @@ fn run(scenario: Scenario) {
             // The late byte must not restart the full read timeout.
             assert!(elapsed < Duration::from_millis(700), "{elapsed:?}");
             assert!(!client.connected);
+        } else if scenario == Scenario::Addressing {
+            result.unwrap();
+            client.write_db(7, 3, &[0xde, 0xad]).unwrap();
+            client.read_db(11, 4, &mut [0; 2]).unwrap();
+            for area in [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB] {
+                client.write_area(area, 9, 5, S7_WL_BYTE, &[area]).unwrap();
+                client.read_area(area, 9, 5, S7_WL_BYTE, &mut [0]).unwrap();
+            }
+            client.write_bit(S7_AREA_MK, 9, 10, 0, true).unwrap();
+            client.write_bit(S7_AREA_DB, 12, 10, 3, false).unwrap();
+            assert!(!client.read_bit(S7_AREA_MK, 9, 10, 0).unwrap());
+            assert!(client.read_bit(S7_AREA_PE, 9, 10, 3).unwrap());
+            client
+                .write_area(S7_AREA_MK, 9, 83, S7_WL_BIT, &[5, 0])
+                .unwrap();
+            let mut buffer = [0xaa, 0xbb];
+            client
+                .read_area(S7_AREA_PE, 9, 83, S7_WL_BIT, &mut buffer)
+                .unwrap();
+            assert_eq!(buffer, [1, 0xbb]);
         } else if scenario == Scenario::PlcError {
             result.unwrap();
             let mut buffer = [0; 4];
@@ -497,8 +599,8 @@ fn run(scenario: Scenario) {
             client.write_bit(S7_AREA_DB, 100, 65535, 7, true).unwrap();
         }
         client.disconnect();
-        server.join().unwrap().unwrap();
-    });
+        server.join().unwrap().unwrap()
+    })
 }
 
 #[test]
@@ -563,6 +665,53 @@ fn malformed_ack_disconnects_client() {
     for writing in [false, true] {
         run(Scenario::MalformedAck(writing));
     }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn bad_tpkt_header_disconnects_client() {
+    for writing in [false, true] {
+        run(Scenario::BadHeader(writing));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn fragmented_reply_disconnects_client() {
+    for writing in [false, true] {
+        run(Scenario::Fragment(writing));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn public_methods_send_their_addresses_and_bit_values() {
+    let seen = |function, wordlen, db, area, address, payload: &[u8]| Seen {
+        function,
+        wordlen,
+        db,
+        area,
+        address,
+        payload: payload.to_vec(),
+    };
+    let mut expected = vec![
+        seen(5, 2, 7, 0x84, 24, &[0xde, 0xad]),
+        seen(4, 2, 11, 0x84, 32, &[]),
+    ];
+    for area in [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB] {
+        let db = if area == S7_AREA_DB { 9 } else { 0 };
+        expected.push(seen(5, 2, db, area, 40, &[area]));
+        expected.push(seen(4, 2, db, area, 40, &[]));
+    }
+    expected.extend([
+        seen(5, 1, 0, 0x83, 80, &[1]),
+        seen(5, 1, 12, 0x84, 83, &[0]),
+        seen(4, 1, 0, 0x83, 80, &[]),
+        seen(4, 1, 0, 0x81, 83, &[]),
+        seen(5, 1, 0, 0x83, 83, &[1]),
+        seen(4, 1, 0, 0x81, 83, &[]),
+    ]);
+    assert_eq!(run(Scenario::Addressing), expected);
 }
 
 #[test]

@@ -482,28 +482,24 @@ impl S7Client {
         wordlen: u8,
         buffer: &mut [u8],
     ) -> Result<()> {
-        self.read_area_impl(area, db_number, u32::from(start), wordlen, buffer)
-            .add_context(|| {
-                format!(
-                    "read_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
-                    buffer.len()
-                )
-            })
+        self.read_area_impl(
+            protocol::Transfer::area(area, db_number, start, wordlen),
+            buffer,
+        )
+        .add_context(|| {
+            format!(
+                "read_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
+                buffer.len()
+            )
+        })
     }
 
-    fn read_area_impl(
-        &mut self,
-        area: u8,
-        db_number: u16,
-        start: u32,
-        wordlen: u8,
-        buffer: &mut [u8],
-    ) -> Result<()> {
+    fn read_area_impl(&mut self, transfer: protocol::Transfer, buffer: &mut [u8]) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
         self.confirmed = 0;
-        self.check_area(area)?;
-        protocol::validate_transfer(start, wordlen, buffer.len())?;
+        self.check_area(transfer.area)?;
+        protocol::validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
         if !self.connected {
             return Err(error::not_connected());
         }
@@ -515,12 +511,7 @@ impl S7Client {
             stream,
             limits,
             &mut self.reference,
-            protocol::Transfer {
-                area,
-                db_number,
-                start,
-                wordlen,
-            },
+            transfer,
             buffer,
             &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
@@ -600,28 +591,24 @@ impl S7Client {
         wordlen: u8,
         buffer: &[u8],
     ) -> Result<()> {
-        self.write_area_impl(area, db_number, u32::from(start), wordlen, buffer)
-            .add_context(|| {
-                format!(
-                    "write_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
-                    buffer.len()
-                )
-            })
+        self.write_area_impl(
+            protocol::Transfer::area(area, db_number, start, wordlen),
+            buffer,
+        )
+        .add_context(|| {
+            format!(
+                "write_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
+                buffer.len()
+            )
+        })
     }
 
-    fn write_area_impl(
-        &mut self,
-        area: u8,
-        db_number: u16,
-        start: u32,
-        wordlen: u8,
-        buffer: &[u8],
-    ) -> Result<()> {
+    fn write_area_impl(&mut self, transfer: protocol::Transfer, buffer: &[u8]) -> Result<()> {
         self.last_time = 0.0;
         self.chunks = 0;
         self.confirmed = 0;
-        self.check_area(area)?;
-        protocol::validate_transfer(start, wordlen, buffer.len())?;
+        self.check_area(transfer.area)?;
+        protocol::validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
         if !self.connected {
             return Err(error::not_connected());
         }
@@ -633,12 +620,7 @@ impl S7Client {
             stream,
             limits,
             &mut self.reference,
-            protocol::Transfer {
-                area,
-                db_number,
-                start,
-                wordlen,
-            },
+            transfer,
             buffer,
             &mut progress,
             Duration::from_millis(self.rd_timeout_ms),
@@ -683,7 +665,7 @@ impl S7Client {
     /// For further info, please refer to `read_area()`
     ///
     pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> Result<()> {
-        self.read_area_impl(S7_AREA_DB, db_number, u32::from(start), S7_WL_BYTE, buffer)
+        self.read_area_impl(protocol::Transfer::db(db_number, start), buffer)
             .add_context(|| format!("read_db db={db_number} start={start} len={}", buffer.len()))
     }
 
@@ -745,11 +727,11 @@ impl S7Client {
         self.last_time = 0.0;
         self.chunks = 0;
         self.confirmed = 0;
-        let start = protocol::bit_start(byte_num, bit_idx)?;
+        let transfer = protocol::Transfer::bit(area, db_number, byte_num, bit_idx)?;
         let mut buffer = [0u8; 1];
-        self.read_area_impl(area, db_number, start, S7_WL_BIT, &mut buffer)?;
+        self.read_area_impl(transfer, &mut buffer)?;
 
-        Ok(buffer[0] != 0)
+        Ok(protocol::bit_value(buffer[0]))
     }
 
     /// ### Writes a block of byte to a specific Data Block (DB)
@@ -772,7 +754,7 @@ impl S7Client {
     /// For further info, please refer to `write_area()`
     ///
     pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> Result<()> {
-        self.write_area_impl(S7_AREA_DB, db_number, u32::from(start), S7_WL_BYTE, buffer)
+        self.write_area_impl(protocol::Transfer::db(db_number, start), buffer)
             .add_context(|| format!("write_db db={db_number} start={start} len={}", buffer.len()))
     }
 
@@ -835,8 +817,8 @@ impl S7Client {
         self.last_time = 0.0;
         self.chunks = 0;
         self.confirmed = 0;
-        let start = protocol::bit_start(byte_num, bit_idx)?;
-        self.write_area_impl(area, db_number, start, S7_WL_BIT, &[u8::from(value)])
+        let transfer = protocol::Transfer::bit(area, db_number, byte_num, bit_idx)?;
+        self.write_area_impl(transfer, &protocol::bit_payload(value))
     }
 }
 
