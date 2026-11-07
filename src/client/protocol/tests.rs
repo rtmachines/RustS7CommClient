@@ -122,6 +122,27 @@ fn read_tpkt_rejects_invalid_lengths() {
 }
 
 #[test]
+fn read_tpkt_rejects_each_bad_header_byte_even_with_full_body() {
+    for header in [[2, 0, 0, 10], [3, 1, 0, 10]] {
+        let mut io = Cursor::new([&header[..], &[0; 6]].concat());
+        assert_kind(
+            &read_tpkt(&mut io, 487, Duration::from_secs(1)),
+            kind::ISO_INVALID_HEADER,
+        );
+        assert_eq!(io.position(), 4);
+    }
+}
+
+#[test]
+fn read_tpkt_accepts_header_only_frame() {
+    let mut io = Cursor::new([3, 0, 0, 4]);
+    assert_eq!(
+        read_tpkt(&mut io, 487, Duration::from_secs(1)).unwrap(),
+        [3, 0, 0, 4]
+    );
+}
+
+#[test]
 fn read_tpkt_propagates_eof_and_timeout() {
     for io_kind in [
         io::ErrorKind::UnexpectedEof,
@@ -182,6 +203,30 @@ fn cotp_headers_are_validated() {
     validate_connection_confirm(&cc_with_options).unwrap();
     let bad_tlv = tpkt(&[9, 0xd0, 0, 1, 0, 1, 0, 0xc0, 2, 10]);
     assert!(validate_connection_confirm(&bad_tlv).is_err());
+}
+
+/// Copies of `frame` that differ from it only in one TPKT header field.
+fn bad_tpkt_headers(frame: &[u8]) -> Vec<Vec<u8>> {
+    let mut version = frame.to_vec();
+    version[0] = 4;
+    let mut reserved = frame.to_vec();
+    reserved[1] = 1;
+    let mut length = frame.to_vec();
+    length[3] += 1;
+    vec![version, reserved, length]
+}
+
+#[test]
+fn frames_with_inconsistent_tpkt_header_are_rejected() {
+    for bad in bad_tpkt_headers(&data_frame(&[0x32])) {
+        assert_kind(&data_payload(&bad), kind::ISO_INVALID_HEADER);
+    }
+    for bad in bad_tpkt_headers(&connection_confirm(&[])) {
+        assert_kind(
+            &validate_connection_confirm(&bad),
+            kind::ISO_CONNECTION_FAILED,
+        );
+    }
 }
 
 fn negotiation_response(length: u16) -> Vec<u8> {
@@ -365,6 +410,15 @@ fn connection_confirm_returns_effective_tpdu_limit() {
     assert_eq!(
         validate_connection_confirm(&connection_confirm(&[0xc1, 2, 1, 0])).unwrap(),
         1024
+    );
+    // A zero-length option may end the frame.
+    assert_eq!(
+        validate_connection_confirm(&connection_confirm(&[0xc1, 0])).unwrap(),
+        1024
+    );
+    assert_eq!(
+        validate_connection_confirm(&connection_confirm(&[0xc0, 1, 9, 0xc1, 0])).unwrap(),
+        512
     );
     for (exponent, expected) in [(7, 128), (8, 256), (9, 512), (10, 1024)] {
         for options in [
@@ -1175,6 +1229,25 @@ fn write_ack_with_extra_data_is_not_success() {
             kind::ISO_INVALID_TELEGRAM,
         );
     }
+}
+
+#[test]
+fn ack_requires_exactly_two_parameter_bytes() {
+    // Same bytes as a valid write ACK, with the parameter/data split moved.
+    for (params, data) in [(3, 0), (0, 3)] {
+        let mut pdu = ack(1, 5, &[0xff]);
+        pdu[7] = params;
+        pdu[9] = data;
+        assert_kind(
+            &validate_write_response(&pdu, 1),
+            kind::ISO_INVALID_TELEGRAM,
+        );
+    }
+}
+
+#[test]
+fn ack_without_data_leaves_payload_checks_to_caller() {
+    assert_eq!(ack_data(&ack(1, 5, &[]), 1, 5).unwrap(), &[] as &[u8]);
 }
 
 mod properties {
