@@ -110,9 +110,11 @@ jobs:
         run: cargo clippy --locked -- -D warnings
       - name: fuzz
         working-directory: fuzz
+        # The prebuilt cargo-fuzz is a musl binary and would default to its own target.
         run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
           for target in $(cargo fuzz list); do
-            cargo fuzz run --sanitizer none "$target" -- -max_total_time=30 -max_len=4096
+            cargo fuzz run --target "$host" --sanitizer none "$target" -- -max_total_time=30 -max_len=4096
           done
       - name: upload crash artifacts
         if: failure()
