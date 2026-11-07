@@ -1352,7 +1352,7 @@ mod properties {
         vec(any::<u8>(), 0..=3).prop_map(|rest| [&[0xff][..], &rest].concat())
     }
 
-    fn coherent_ack() -> impl Strategy<Value = Vec<u8>> {
+    pub(super) fn coherent_ack() -> impl Strategy<Value = Vec<u8>> {
         (
             prop_oneof![6 => Just(3u8), 1 => Just(2u8), 1 => any::<u8>()],
             prop_oneof![6 => Just(1u16), 1 => any::<u16>()],
@@ -1972,6 +1972,155 @@ mod invariants {
                 offset += n;
             }
             prop_assert_eq!(offset, len);
+        }
+    }
+}
+
+/// Parsers and transfers fed input outside the shapes the other generators build.
+mod arbitrary_input {
+    use super::properties::coherent_ack;
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn kind_of<T>(result: &Result<T>) -> Option<&str> {
+        result.as_ref().err().and_then(|e| e.get_type())
+    }
+
+    /// Raw bytes, then frames that pass successively more of the TPKT, COTP and S7 checks.
+    fn any_frame() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            vec(any::<u8>(), 0..=64),
+            vec(any::<u8>(), 0..=600).prop_map(|body| tpkt(&body)),
+            vec(any::<u8>(), 0..=24).prop_map(|options| connection_confirm(&options)),
+            any::<u16>().prop_map(negotiation_response),
+            coherent_ack().prop_map(|pdu| data_frame(&pdu)),
+        ]
+    }
+
+    fn item_kind(status: u8) -> &'static str {
+        match status {
+            5 => kind::S7_INVALID_ADDRESS,
+            10 => kind::S7_NOT_FOUND,
+            _ => kind::S7_UNSPECIFIED,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        /// Frame parsers: any bytes are rejected with the parser's own kind, and an accepted
+        /// frame is exactly what the parser claims it is.
+        #[test]
+        fn frame_parsers_classify_any_bytes(frame in any_frame(), requested in 29u16..=480) {
+            match data_payload(&frame) {
+                Ok(pdu) => {
+                    prop_assert_eq!(&frame[..2], &[3, 0]);
+                    prop_assert_eq!(usize::from(u16::from_be_bytes([frame[2], frame[3]])), frame.len());
+                    prop_assert_eq!(&frame[4..7], &[2, 0xf0, 0x80]);
+                    prop_assert_eq!(pdu, &frame[7..]);
+                }
+                Err(e) => prop_assert!(matches!(
+                    e.get_type(),
+                    Some(kind::ISO_INVALID_HEADER | kind::ISO_FRAGMENTED_PACKET)
+                )),
+            }
+            match confirm(&frame) {
+                Ok(limit) => prop_assert!(limit.is_power_of_two() && (128..=1024).contains(&limit)),
+                Err(e) => prop_assert_eq!(e.get_type(), Some(kind::ISO_CONNECTION_FAILED)),
+            }
+            match accept_negotiation(&frame, requested) {
+                Ok(limits) => prop_assert!((29..=requested).contains(&limits.pdu_length)),
+                Err(e) => prop_assert_eq!(e.get_type(), Some(kind::PDU_NEGOTIATION_FAILED)),
+            }
+        }
+
+        /// Setup Communication: the reply is accepted iff the PLC offers a size the client
+        /// can use, 29 up to what it requested, and the session then uses that size.
+        #[test]
+        fn negotiation_accepts_exactly_the_usable_sizes(
+            requested in 29u16..=480,
+            offered in prop_oneof![0u16..=40, 460u16..=500, any::<u16>()],
+        ) {
+            let result = accept_negotiation(&negotiation_response(offered), requested);
+            if (29..=requested).contains(&offered) {
+                prop_assert_eq!(result.unwrap().pdu_length, offered);
+            } else {
+                prop_assert_eq!(kind_of(&result), Some(kind::PDU_NEGOTIATION_FAILED));
+            }
+        }
+
+        /// Response validation: any PDU is rejected as a malformed telegram or a PLC error,
+        /// and an accepted read returns the last `n` bytes of the PDU.
+        #[test]
+        fn responses_classify_any_pdu(
+            pdu in prop_oneof![vec(any::<u8>(), 0..=600), coherent_ack()],
+            reference in prop_oneof![Just(1u16), any::<u16>()],
+            wordlen in prop_oneof![Just(1u8), Just(2u8), any::<u8>()],
+            n in prop_oneof![1usize..=40, 0usize..=600],
+        ) {
+            let allowed = [
+                kind::ISO_INVALID_TELEGRAM,
+                kind::S7_INVALID_ADDRESS,
+                kind::S7_NOT_FOUND,
+                kind::S7_UNSPECIFIED,
+            ];
+            match validate_read_response(&pdu, reference, wordlen, n) {
+                Ok(data) => {
+                    prop_assert_eq!(data, &pdu[pdu.len() - n..]);
+                    prop_assert_eq!(&pdu[4..6], &reference.to_be_bytes());
+                }
+                Err(e) => prop_assert!(e.get_type().is_some_and(|k| allowed.contains(&k))),
+            }
+            match validate_write_response(&pdu, reference) {
+                Ok(()) => prop_assert_eq!(&pdu[pdu.len() - 1..], &[0xff]),
+                Err(e) => prop_assert!(e.get_type().is_some_and(|k| allowed.contains(&k))),
+            }
+        }
+
+        /// A transfer stops at the first chunk the PLC rejects: nothing is retried, only the
+        /// chunks before it are confirmed, and a read leaves the rest of the buffer untouched.
+        #[test]
+        fn transfer_stops_at_the_first_rejected_chunk(
+            pdu in 29u16..=480,
+            len in 1usize..=1500,
+            failing in any::<prop::sample::Index>(),
+            status in any::<u8>().prop_filter("an item error", |s| *s != 0xff),
+            writing in any::<bool>(),
+        ) {
+            let limits = PduLimits::new(pdu).unwrap();
+            let limit = if writing { limits.write_payload } else { limits.read_payload };
+            let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+            let chunks: Vec<&[u8]> = data.chunks(limit).collect();
+            let failing = failing.index(chunks.len());
+            let mut io = Scripted::default();
+            for (index, chunk) in chunks[..failing].iter().enumerate() {
+                let reference = (index + 1) as u16;
+                let pdu = if writing { ack(reference, 5, &[0xff]) } else { read_ack(reference, chunk, false) };
+                io.reads.push_back(Ok(data_frame(&pdu)));
+            }
+            let reference = (failing + 1) as u16;
+            let rejected = if writing { ack(reference, 5, &[status]) } else { ack(reference, 4, &[status, 0, 0, 0]) };
+            io.reads.push_back(Ok(data_frame(&rejected)));
+
+            let mut reference = 0;
+            let mut progress = Progress::default();
+            let mut buffer = vec![0xaa; len];
+            let at = Transfer { area: 0x84, db_number: 1, start: 0, wordlen: 2 };
+            let result = if writing {
+                write_transfer(&mut io, &limits, &mut reference, at, &data, &mut progress, SECOND)
+            } else {
+                read_transfer(&mut io, &limits, &mut reference, at, &mut buffer, &mut progress, SECOND)
+            };
+            let confirmed = failing * limit;
+            prop_assert_eq!(kind_of(&result), Some(item_kind(status)));
+            prop_assert_eq!((progress.chunks, progress.confirmed), (failing + 1, confirmed));
+            prop_assert_eq!(requests(&io).len(), failing + 1);
+            prop_assert_eq!(unread(&io), 0);
+            if !writing {
+                prop_assert_eq!(&buffer[..confirmed], &data[..confirmed]);
+                prop_assert!(buffer[confirmed..].iter().all(|b| *b == 0xaa));
+            }
         }
     }
 }

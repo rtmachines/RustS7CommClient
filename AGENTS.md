@@ -23,6 +23,10 @@ toolchainu Rust, Cargo oraz komponentów rustfmt i clippy. MSRV biblioteki to 1.
 | Klient async (feature `tokio`) | powyższe komendy check/test/tcp_smoke/clippy/doc z `--features tokio`, np. `cargo clippy --all-targets --features tokio -- -D warnings`, `cargo test --test tcp_smoke --features tokio -- --ignored` |
 | Test async łączący się z loopbackiem w bibliotece | `cargo test --lib --features tokio -- --ignored` |
 | Tokio poza drzewem bez feature'a | `cargo tree -e normal` (wynik nie może zawierać `tokio`) |
+| Fuzzing parsera (w katalogu `fuzz/`; targety `frames`, `responses`, `transfer`) | `cargo +nightly fuzz run --sanitizer none <target> -- -max_total_time=60` |
+| Odtworzenie crasha z fuzzingu | `cargo +nightly fuzz run --sanitizer none <target> artifacts/<target>/<plik>` |
+| Lint crate'u fuzz (w katalogu `fuzz/`) | `RUSTFLAGS='--cfg fuzzing' cargo +nightly clippy -- -D warnings` |
+| Lint biblioteki w konfiguracji fuzz | `RUSTFLAGS='--cfg fuzzing' cargo clippy --lib --target-dir target/fuzzcheck -- -D warnings` |
 
 Feature `tokio` jest domyślnie wyłączony. Zmiany w `src/client/protocol.rs`, `src/client/shared.rs`
 lub kliencie async sprawdzaj w obu wariantach: bez feature'a i z `--features tokio`.
@@ -31,6 +35,11 @@ jest wspólna dla `S7Client` i `AsyncS7Client`; w `protocol/async_io.rs` i `asyn
 trzymaj tylko I/O i glue. Testy async: src/client/protocol/async_io/tests.rs (duplex, bez gniazd),
 tests/tcp_smoke/async_client.rs (loopback, `--ignored`), src/client/async_client/tests.rs
 (stan prywatny; test z loopbackiem `--ignored`) i moduł `async_api` w tests/public_errors.rs.
+
+Fuzzing wymaga toolchainu nightly i `cargo-fuzz`. fuzz/ to osobny pakiet, poza głównymi
+komendami Cargo; korpus i artefakty nie trafiają do repozytorium. Targety wołają wrappery
+z src/client/fuzzing.rs, kompilowane tylko pod `cfg(fuzzing)` i niebędące publicznym API;
+po zmianie sygnatur w `protocol.rs` popraw wrappery i uruchom oba linty fuzz z tabeli.
 
 Cargo obsługuje tutaj `--offline`; używaj go, gdy potrzebne zależności są lokalnie.
 Po zmianach Rust uruchom kontrolę formatowania, Clippy oraz testy. Dla zmian
