@@ -4,6 +4,13 @@ use super::protocol;
 use super::{CT_PG, CT_S7};
 use crate::error::{self, Result};
 
+/// An open connection: the socket and the limits negotiated on it, which
+/// exist only together.
+pub(super) struct Session<S> {
+    pub(super) stream: S,
+    pub(super) limits: protocol::PduLimits,
+}
+
 pub(super) fn check_connection_type(connection_type: u16) -> Result<()> {
     if !(CT_PG..=CT_S7).contains(&connection_type) {
         return Err(error::invalid_fun_parameter());

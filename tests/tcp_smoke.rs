@@ -586,6 +586,16 @@ fn run(scenario: Scenario) -> Vec<Seen> {
                 kind::INVALID_FUN_PARAMETER,
             );
             assert!(client.connected); // The existing connection is kept.
+                                       // So it is after an invalid area, which sends nothing: the reads below use it.
+            assert_kind(
+                &client.read_area(0x99, 1, 0, S7_WL_BYTE, &mut [0; 2]),
+                kind::INVALID_FUN_PARAMETER,
+            );
+            assert_kind(
+                &client.write_area(0x85, 1, 0, S7_WL_BYTE, &[0; 2]),
+                kind::INVALID_FUN_PARAMETER,
+            );
+            assert!(client.connected);
             client.pdu_length = 65535; // Diagnostics cannot override negotiated limits.
             let mut read = vec![0xaa; 65536];
             client.read_db(100, 0, &mut read).unwrap();
@@ -631,6 +641,29 @@ fn late_reply_disconnects_client() {
 #[ignore = "requires permission to open loopback sockets"]
 fn plc_error_keeps_connection() {
     run(Scenario::PlcError);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn cleared_connected_flag_sends_no_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback sockets required");
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || serve(listener.accept()?.0, Scenario::Normal));
+    let mut client = S7Client::new();
+    client.set_connection_port(port).unwrap();
+    client.set_timeout(1000, 1000, 1000).unwrap();
+    client.connect_s71200_1500("127.0.0.1").unwrap();
+    client.connected = false;
+    assert_kind(&client.read_db(100, 0, &mut [0; 4]), kind::NOT_CONNECTED);
+    assert_kind(&client.write_db(100, 0, &[1; 4]), kind::NOT_CONNECTED);
+    assert_eq!(client.pdu_length, 240);
+    // The session itself is kept: restoring the flag uses it.
+    client.connected = true;
+    client.write_db(100, 0, &[1, 2, 3, 4]).unwrap();
+    drop(client);
+    let seen = server.join().unwrap().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].payload, [1, 2, 3, 4]);
 }
 
 #[test]

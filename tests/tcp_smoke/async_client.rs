@@ -1,6 +1,6 @@
 //! `AsyncS7Client` against a mock PLC on a tokio loopback listener.
 use super::{assert_job_time, assert_kind, contexts, reply, SLOW};
-use rust7::{kind, AsyncS7Client, S7_AREA_DB, S7_WL_BIT};
+use rust7::{kind, AsyncS7Client, S7_AREA_DB, S7_WL_BIT, S7_WL_BYTE};
 use std::io;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -288,6 +288,15 @@ async fn async_plc_error_keeps_the_session() {
         ["read_db db=99 start=0 len=4"]
     );
     assert_kind(&client.write_db(99, 0, &[1; 4]).await, kind::S7_NOT_FOUND);
+    // An invalid area sends nothing and keeps the session too.
+    assert_kind(
+        &client.read_area(0x99, 1, 0, S7_WL_BYTE, &mut [0; 2]).await,
+        kind::INVALID_FUN_PARAMETER,
+    );
+    assert_kind(
+        &client.write_area(0x85, 1, 0, S7_WL_BYTE, &[0; 2]).await,
+        kind::INVALID_FUN_PARAMETER,
+    );
     assert!(client.connected);
     assert_eq!(client.pdu_length, 240);
     assert_eq!(client.last_time, 0.0);
@@ -425,8 +434,14 @@ async fn async_cleared_connected_flag_sends_no_request() {
         kind::NOT_CONNECTED,
     );
     assert_kind(&client.write_db(1, 0, &[1; 4]).await, kind::NOT_CONNECTED);
+    assert_eq!(client.pdu_length, 240);
+    // The session itself is kept, as in `S7Client`: restoring the flag uses it.
+    client.connected = true;
+    client.write_db(1, 0, &[1, 2, 3, 4]).await.unwrap();
     drop(client);
-    assert!(server.await.unwrap().requests.is_empty());
+    let served = server.await.unwrap();
+    assert_eq!(served.requests.len(), 1);
+    assert!(served.closed_by_client);
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 use super::protocol::async_io::{self, Timeouts};
 use super::protocol::{self, Progress};
-use super::shared::{self, ctx};
+use super::shared::{self, ctx, Session};
 use super::CT_PG;
 use crate::error::{self, Result};
 use anyerror::AddContext;
@@ -60,7 +60,7 @@ const DEFAULT_WR_TIMEOUT_MS: u64 = 500;
 /// - `disconnect()` is synchronous: it drops (closes) the socket without an
 ///   asynchronous shutdown, so it also runs on drop and on cancellation.
 pub struct AsyncS7Client {
-    stream: Option<TcpStream>,
+    session: Option<Session<TcpStream>>,
     port: u16,
     co_timeout_ms: u64,
     rd_timeout_ms: u64,
@@ -69,7 +69,6 @@ pub struct AsyncS7Client {
     /// timeout of `S7Client`.
     session_wr_timeout: Duration,
     conn_type: u16,
-    limits: Option<protocol::PduLimits>,
     reference: u16,
     /// S7 PDU length negotiated by the CPU, excluding COTP (diagnostic value).
     /// Changing this field does not change the internal negotiated limits.
@@ -90,7 +89,9 @@ pub struct AsyncS7Client {
 }
 
 /// Disconnects the client unless the I/O it guards ran to completion, so a
-/// future dropped mid-exchange cannot leave the stream out of step.
+/// future dropped mid-exchange cannot leave the stream out of step. The
+/// session is out of the client during the exchange and is dropped, closing
+/// its socket, with such a future.
 struct InFlight<'a> {
     client: &'a mut AsyncS7Client,
     progress: Progress,
@@ -114,14 +115,13 @@ impl AsyncS7Client {
     /// disconnected; use one of the `connect_XXX` methods to open a connection to a PLC.
     pub fn new() -> Self {
         AsyncS7Client {
-            stream: None,
+            session: None,
             port: 102,
             co_timeout_ms: 3000,
             rd_timeout_ms: 1000,
             wr_timeout_ms: DEFAULT_WR_TIMEOUT_MS,
             session_wr_timeout: Duration::from_millis(DEFAULT_WR_TIMEOUT_MS),
             conn_type: CT_PG,
-            limits: None,
             reference: 0,
             pdu_length: 0,
             connected: false,
@@ -263,11 +263,10 @@ impl AsyncS7Client {
 
         let limits = async_io::negotiate(&mut stream, tpdu_limit, timeouts).await?;
         self.pdu_length = limits.pdu_length;
-        self.limits = Some(limits);
         self.reference = 0;
         self.session_wr_timeout = timeouts.write;
 
-        self.stream = Some(stream);
+        self.session = Some(Session { stream, limits });
         self.connected = true;
         self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -279,8 +278,7 @@ impl AsyncS7Client {
     /// Synchronous: drops (closes) the socket. Safe to call even if the client is not
     /// connected. After disconnection, calls to read/write return `kind::NOT_CONNECTED`.
     pub fn disconnect(&mut self) {
-        self.stream = None;
-        self.limits = None;
+        self.session = None;
         self.connected = false;
         self.pdu_length = 0;
     }
@@ -328,33 +326,23 @@ impl AsyncS7Client {
         transfer: protocol::Transfer,
         buffer: &mut [u8],
     ) -> Result<()> {
-        self.begin(transfer, buffer.len())?;
+        let mut session = self.begin(transfer, buffer.len())?;
         let time = Instant::now();
         let timeouts = self.session_timeouts();
         let mut guard = InFlight::new(self);
-        let result = {
-            let InFlight {
-                client, progress, ..
-            } = &mut guard;
-            // `begin` checked both; a missing one is reported without breaking the session.
-            match (client.stream.as_mut(), client.limits.as_ref()) {
-                (Some(stream), Some(limits)) => {
-                    async_io::read_transfer(
-                        stream,
-                        limits,
-                        &mut client.reference,
-                        transfer,
-                        buffer,
-                        progress,
-                        timeouts,
-                    )
-                    .await
-                }
-                _ => Err(error::not_connected()),
-            }
-        };
+        let result = async_io::read_transfer(
+            &mut session.stream,
+            &session.limits,
+            &mut guard.client.reference,
+            transfer,
+            buffer,
+            &mut guard.progress,
+            timeouts,
+        )
+        .await;
         guard.done = true;
         drop(guard);
+        self.session = Some(session);
         self.finish(result, time)
     }
 
@@ -379,47 +367,41 @@ impl AsyncS7Client {
     }
 
     async fn write_area_impl(&mut self, transfer: protocol::Transfer, buffer: &[u8]) -> Result<()> {
-        self.begin(transfer, buffer.len())?;
+        let mut session = self.begin(transfer, buffer.len())?;
         let time = Instant::now();
         let timeouts = self.session_timeouts();
         let mut guard = InFlight::new(self);
-        let result = {
-            let InFlight {
-                client, progress, ..
-            } = &mut guard;
-            // `begin` checked both; a missing one is reported without breaking the session.
-            match (client.stream.as_mut(), client.limits.as_ref()) {
-                (Some(stream), Some(limits)) => {
-                    async_io::write_transfer(
-                        stream,
-                        limits,
-                        &mut client.reference,
-                        transfer,
-                        buffer,
-                        progress,
-                        timeouts,
-                    )
-                    .await
-                }
-                _ => Err(error::not_connected()),
-            }
-        };
+        let result = async_io::write_transfer(
+            &mut session.stream,
+            &session.limits,
+            &mut guard.client.reference,
+            transfer,
+            buffer,
+            &mut guard.progress,
+            timeouts,
+        )
+        .await;
         guard.done = true;
         drop(guard);
+        self.session = Some(session);
         self.finish(result, time)
     }
 
-    /// Resets the statistics and runs the checks that precede any I/O.
-    fn begin(&mut self, transfer: protocol::Transfer, len: usize) -> Result<()> {
+    /// Resets the statistics, runs the checks that precede any I/O and takes
+    /// the session out of the client for the exchange.
+    fn begin(&mut self, transfer: protocol::Transfer, len: usize) -> Result<Session<TcpStream>> {
         self.last_time = 0.0;
         self.chunks = 0;
         self.confirmed = 0;
         shared::check_area(transfer.area)?;
         protocol::validate_transfer(transfer.start, transfer.wordlen, len)?;
-        if !self.connected || self.stream.is_none() || self.limits.is_none() {
-            return Err(error::not_connected());
+        match self.session.take() {
+            Some(session) if self.connected => Ok(session),
+            session => {
+                self.session = session;
+                Err(error::not_connected())
+            }
         }
-        Ok(())
     }
 
     /// Records the job time on success and drops a connection whose stream
