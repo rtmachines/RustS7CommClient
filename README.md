@@ -13,6 +13,7 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 - Strict control of incoming headers.
 - Automatic telegram splitting for large reads/writes.
 - Connection helpers methods for S71200/1500 and S7300.
+- Optional asynchronous client on tokio (feature `tokio`, off by default).
 ---
 
 ## Quick start
@@ -74,6 +75,50 @@ the session usable. An empty or malformed `ACK` disconnects the client.
 limits. `chunks` counts attempted read/write chunks, including a failing chunk; `confirmed` counts
 buffer bytes confirmed in the last read/write (copied from verified responses or acknowledged
 by the PLC), reset together with `chunks`.
+
+## Async (tokio)
+
+Enable the `tokio` feature to get `rust7::AsyncS7Client`, the async counterpart of
+`S7Client` with the same settings, operations, status fields, error categories and
+contexts. Without the feature the dependency tree is unchanged.
+
+```toml
+[dependencies]
+rust7 = { version = "0.2", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+```
+
+```rust,no_run
+# #[cfg(feature = "tokio")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> rust7::Result<()> {
+    let mut client = rust7::AsyncS7Client::new();
+    client.connect_s71200_1500("192.168.0.100").await?;
+
+    let mut buffer = vec![0u8; 64];
+    client.read_db(100, 0, &mut buffer).await?;
+    client.write_db(100, 0, &buffer[..4]).await?;
+    println!("Job time (ms) : {:.3}", client.last_time);
+
+    client.disconnect(); // synchronous: closes the socket
+    Ok(())
+}
+# #[cfg(not(feature = "tokio"))]
+# fn main() {}
+```
+
+- Methods take `&mut self`, one request is in flight at a time, and the futures are `Send`.
+- Run the futures on a tokio 1 runtime with I/O and time enabled (`#[tokio::main]` or
+  `Builder::enable_all()`).
+- Cancellation: a future that was never polled has no effect. Dropping a started call
+  (for example through `tokio::select!` or `tokio::time::timeout`) disconnects the
+  client and closes the socket; the next read or write returns `kind::NOT_CONNECTED`.
+  `chunks` and `confirmed` keep their meaning: for a write, bytes `[0, confirmed)` were
+  acknowledged and the chunk starting at `confirmed` may or may not have been written.
+  Writes are never retried.
+- The read timeout bounds a whole response frame, as in `S7Client`. The write timeout
+  bounds sending a whole request (`request not sent within <N> ms`) and, as in `S7Client`,
+  is fixed when connecting; the connect timeout bounds the TCP connect.
 
 ## Errors
 

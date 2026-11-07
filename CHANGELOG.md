@@ -18,6 +18,9 @@
 
 ### Added
 - Minimum supported Rust version declared: `rust-version = "1.99"`
+- Optional feature `tokio` (off by default) with `rust7::AsyncS7Client` (also `rust7::client::AsyncS7Client`), the async counterpart of `S7Client`: the same setters, `connect_*`, `read_area`/`write_area`, `read_db`/`write_db`, `read_bit`/`write_bit` as `async fn(&mut self)` returning `Send` futures, a synchronous `disconnect()`, and the same public fields (`connected`, `pdu_length`, `last_time`, `chunks`, `confirmed`). Requests, response checks, PDU limits, telegram splitting and address validation are shared with `S7Client`, so error categories, contexts and session rules are identical. Uses tokio 1 (>= 1.48) with only the `net`, `time` and `io-util` features; without the feature the dependency tree is unchanged
+- `AsyncS7Client` cancellation: dropping a started call disconnects the client and closes the socket (`connected == false`, next call `kind::NOT_CONNECTED`); `chunks` and `confirmed` keep the values reached, with the usual write semantics. A never-polled future has no effect
+- `AsyncS7Client` timeouts: the read timeout bounds a whole response frame with the same `kind::IO` message as `S7Client`; the write timeout bounds sending a whole request (`request not sent within <N> ms`) and, as in `S7Client`, is fixed when connecting; the connect timeout bounds the TCP connect (`TCP connection not established within <N> ms`). It needs a tokio 1 runtime with I/O and time enabled
 - `S7Client::confirmed` reports the buffer bytes confirmed in the last read or write; after a write error the chunk starting there may have been applied
 - Errors implement `std::error::Error` (via `AnyError`)
 - Public module `rust7::error` with `kind`, `Result` and `AnyError`, also re-exported at the crate root
