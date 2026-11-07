@@ -92,6 +92,8 @@ enum Scenario {
     PlcError,
     AckError(bool),
     MalformedAck(bool),
+    BadHeader(bool),
+    Fragment(bool),
     MidFrameClose,
     S7300,
     Tsap,
@@ -305,8 +307,15 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         if scenario == Scenario::Slow {
             thread::sleep(SLOW);
         }
-        let response = reply(&request[11..13], request[17], &data);
+        let mut response = reply(&request[11..13], request[17], &data);
         assert!(response.len() - 4 <= tpdu_limit);
+        if first {
+            match scenario {
+                Scenario::BadHeader(_) => response[0] = 2,
+                Scenario::Fragment(_) => response[6] = 0,
+                _ => {}
+            }
+        }
         send_split(&mut stream, &response)?;
     }
 }
@@ -361,7 +370,11 @@ fn run(scenario: Scenario) {
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut [0]), kind::NOT_CONNECTED);
-        } else if let Scenario::AckError(writing) | Scenario::MalformedAck(writing) = scenario {
+        } else if let Scenario::AckError(writing)
+        | Scenario::MalformedAck(writing)
+        | Scenario::BadHeader(writing)
+        | Scenario::Fragment(writing) = scenario
+        {
             result.unwrap();
             let mut buffer = [0xaa; 600];
             let result = if writing {
@@ -373,8 +386,16 @@ fn run(scenario: Scenario) {
             assert_eq!(client.chunks, 1);
             assert_eq!(client.confirmed, 0);
             assert_eq!(client.last_time, 0.0);
-            if matches!(scenario, Scenario::MalformedAck(_)) {
-                assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+            if matches!(
+                scenario,
+                Scenario::MalformedAck(_) | Scenario::BadHeader(_) | Scenario::Fragment(_)
+            ) {
+                let expected = match scenario {
+                    Scenario::BadHeader(_) => kind::ISO_INVALID_HEADER,
+                    Scenario::Fragment(_) => kind::ISO_FRAGMENTED_PACKET,
+                    _ => kind::ISO_INVALID_TELEGRAM,
+                };
+                assert_kind(&result, expected);
                 assert!(!client.connected);
                 assert_eq!(client.pdu_length, 0);
                 assert_kind(&client.write_db(100, 0, &[1]), kind::NOT_CONNECTED);
@@ -575,6 +596,22 @@ fn terminal_error_ack_keeps_connection_for_next_read_and_write() {
 fn malformed_ack_disconnects_client() {
     for writing in [false, true] {
         run(Scenario::MalformedAck(writing));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn bad_tpkt_header_disconnects_client() {
+    for writing in [false, true] {
+        run(Scenario::BadHeader(writing));
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn fragmented_reply_disconnects_client() {
+    for writing in [false, true] {
+        run(Scenario::Fragment(writing));
     }
 }
 

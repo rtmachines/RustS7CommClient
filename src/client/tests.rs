@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{assert_kind, kind};
+use anyerror::AnyError;
 
 #[test]
 fn public_bit_helpers_accept_full_byte_range_without_panicking() {
@@ -141,6 +142,86 @@ fn finish_preserves_session_only_for_valid_error_ack() {
                 assert_eq!(client.pdu_length, 125);
             }
         }
+    }
+}
+
+#[test]
+fn finish_applies_the_session_rule_of_every_kind() {
+    let table = [
+        (kind::IO, error::io(std::io::Error::other("x")), true),
+        (kind::NOT_CONNECTED, error::not_connected(), false),
+        (
+            kind::TCP_CONNECTION_FAILED,
+            error::tcp_connection_failed(),
+            false,
+        ),
+        (kind::CONNECTION_CLOSED, error::connection_closed(), true),
+        (
+            kind::ISO_CONNECTION_FAILED,
+            error::iso_connection_failed(),
+            false,
+        ),
+        (
+            kind::ISO_FRAGMENTED_PACKET,
+            error::iso_fragmented_packet(),
+            true,
+        ),
+        (kind::ISO_INVALID_HEADER, error::iso_invalid_header(), true),
+        (
+            kind::ISO_INVALID_TELEGRAM,
+            error::iso_invalid_telegram(),
+            true,
+        ),
+        (
+            kind::PDU_NEGOTIATION_FAILED,
+            error::pdu_negotiation_failed(),
+            false,
+        ),
+        (
+            kind::INVALID_FUN_PARAMETER,
+            error::invalid_fun_parameter(),
+            false,
+        ),
+        (kind::S7_NOT_FOUND, error::s7_not_found(), false),
+        (kind::S7_INVALID_ADDRESS, error::s7_invalid_address(), false),
+        (kind::S7_UNSPECIFIED, error::s7_header_error(0x81, 4), false),
+    ];
+    let mut kinds: Vec<&str> = table.iter().map(|(kind, _, _)| *kind).collect();
+    kinds.sort_unstable();
+    let mut all = kind::ALL.to_vec();
+    all.sort_unstable();
+    assert_eq!(kinds, all);
+
+    let connected_client = || {
+        let mut client = S7Client::new();
+        client.connected = true;
+        client.pdu_length = 125;
+        client.limits = Some(protocol::PduLimits::new(125).unwrap());
+        client
+    };
+    for (expected, err, breaks) in table {
+        let mut client = connected_client();
+        let e = client.finish(Err(err), Instant::now()).unwrap_err();
+        assert_eq!(e.get_type(), Some(expected));
+        if breaks {
+            assert!(!client.connected, "{expected} must disconnect");
+            assert!(client.limits.is_none());
+            assert_eq!(client.pdu_length, 0);
+        } else {
+            assert!(client.connected, "{expected} must keep the session");
+            assert!(client.limits.is_some());
+            assert_eq!(client.pdu_length, 125);
+        }
+    }
+    for err in [
+        AnyError::error("x"),
+        AnyError::error("x").with_type(Some("other::X")),
+    ] {
+        let mut client = connected_client();
+        client.finish(Err(err), Instant::now()).unwrap_err();
+        assert!(!client.connected);
+        assert!(client.limits.is_none());
+        assert_eq!(client.pdu_length, 0);
     }
 }
 
