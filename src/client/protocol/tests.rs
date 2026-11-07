@@ -1315,7 +1315,7 @@ fn requests_match_reference_bytes() {
     );
     let write_bit = Transfer::bit(S7_AREA_PA, 0, 10, 3).unwrap();
     assert_eq!(
-        request(&write_bit, 0, 1, 0x0a0d, Some(&[0])),
+        request(&write_bit, 0, 1, 0x0a0d, Some(&bit_payload(false))),
         vec![
             3, 0, 0, 0x24, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 0x0a, 0x0d, 0, 0x0e, 0, 5, //
             5, 1, 0x12, 0x0a, 0x10, 1, 0, 1, 0, 0, 0x82, 0, 0, 0x53, //
