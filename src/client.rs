@@ -9,8 +9,13 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use std::time::Instant;
 
+#[cfg(feature = "tokio")]
+mod async_client;
 mod protocol;
 mod shared;
+
+#[cfg(feature = "tokio")]
+pub use async_client::AsyncS7Client;
 
 use shared::ctx;
 

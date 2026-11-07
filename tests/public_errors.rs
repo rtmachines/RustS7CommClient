@@ -171,3 +171,188 @@ fn unresolvable_address_is_an_io_error_with_connect_context() {
     );
     assert!(!client.connected);
 }
+
+#[cfg(feature = "tokio")]
+mod async_api {
+    use super::contexts;
+    use rust7::kind::{INVALID_FUN_PARAMETER, NOT_CONNECTED};
+    use rust7::{AsyncS7Client, S7_AREA_DB, S7_AREA_MK, S7_AREA_PA, S7_AREA_PE, S7_WL_BYTE};
+    use std::future::Future;
+
+    #[test]
+    fn async_client_is_exported_from_the_client_module() {
+        let _: rust7::client::AsyncS7Client = AsyncS7Client::default();
+    }
+
+    #[test]
+    fn setters_and_disconnect_are_synchronous() {
+        let _: fn(&mut AsyncS7Client, u16) -> rust7::Result<()> =
+            AsyncS7Client::set_connection_type;
+        let _: fn(&mut AsyncS7Client, u64, u64, u64) -> rust7::Result<()> =
+            AsyncS7Client::set_timeout;
+        let _: fn(&mut AsyncS7Client, u16) -> rust7::Result<()> =
+            AsyncS7Client::set_connection_port;
+        let _: fn(&mut AsyncS7Client) = AsyncS7Client::disconnect;
+        let _: fn() -> AsyncS7Client = AsyncS7Client::new;
+    }
+
+    /// Compiled only: pins the output type of every async method.
+    #[allow(dead_code)]
+    async fn async_methods_return_rust7_results(c: &mut AsyncS7Client, buf: &mut [u8]) {
+        let _: rust7::Result<()> = c.connect_s71200_1500("ip").await;
+        let _: rust7::Result<()> = c.connect_s7300("ip").await;
+        let _: rust7::Result<()> = c.connect_rack_slot("ip", 0, 1).await;
+        let _: rust7::Result<()> = c.connect_tsap("ip", 0x100, 0x102).await;
+        let _: rust7::Result<()> = c.read_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, buf).await;
+        let _: rust7::Result<()> = c.write_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, buf).await;
+        let _: rust7::Result<()> = c.read_db(1, 0, buf).await;
+        let _: rust7::Result<()> = c.write_db(1, 0, buf).await;
+        let _: rust7::Result<bool> = c.read_bit(S7_AREA_DB, 1, 0, 0).await;
+        let _: rust7::Result<()> = c.write_bit(S7_AREA_DB, 1, 0, 0, true).await;
+    }
+
+    fn assert_send<F: Future + Send>(_: F) {}
+
+    #[test]
+    fn futures_are_send() {
+        fn client_is_send<T: Send + Sync>() {}
+        client_is_send::<AsyncS7Client>();
+        let mut c = AsyncS7Client::new();
+        let mut buf = [0; 4];
+        assert_send(c.connect_s71200_1500("ip"));
+        assert_send(c.connect_s7300("ip"));
+        assert_send(c.connect_rack_slot("ip", 0, 1));
+        assert_send(c.connect_tsap("ip", 0x100, 0x102));
+        assert_send(c.read_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, &mut buf));
+        assert_send(c.write_area(S7_AREA_DB, 1, 0, S7_WL_BYTE, &buf));
+        assert_send(c.read_db(1, 0, &mut buf));
+        assert_send(c.write_db(1, 0, &buf));
+        assert_send(c.read_bit(S7_AREA_DB, 1, 0, 0));
+        assert_send(c.write_bit(S7_AREA_DB, 1, 0, 0, true));
+    }
+
+    #[test]
+    fn status_fields_are_public() {
+        let c = AsyncS7Client::new();
+        let _: (bool, u16, f64, usize, usize) = (
+            c.connected,
+            c.pdu_length,
+            c.last_time,
+            c.chunks,
+            c.confirmed,
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_calls_have_the_sync_contexts() {
+        let mut c = AsyncS7Client::new();
+        let err = c.read_db(7, 3, &mut [0; 4]).await.unwrap_err();
+        assert_eq!(err.get_type(), Some(NOT_CONNECTED));
+        assert_eq!(contexts(&err), ["read_db db=7 start=3 len=4"]);
+        assert!(std::error::Error::source(&err).is_none());
+
+        let err = c.write_db(7, 3, &[0; 2]).await.unwrap_err();
+        assert_eq!(contexts(&err), ["write_db db=7 start=3 len=2"]);
+        let err = c
+            .read_area(S7_AREA_DB, 5, 10, S7_WL_BYTE, &mut [0; 6])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            contexts(&err),
+            ["read_area area=0x84 db=5 start=10 wordlen=2 len=6"]
+        );
+        let err = c
+            .write_area(S7_AREA_DB, 5, 10, S7_WL_BYTE, &[0; 6])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            contexts(&err),
+            ["write_area area=0x84 db=5 start=10 wordlen=2 len=6"]
+        );
+        let err = c.read_bit(S7_AREA_DB, 1, 0, 8).await.unwrap_err();
+        assert_eq!(err.get_type(), Some(INVALID_FUN_PARAMETER));
+        assert_eq!(
+            contexts(&err),
+            ["read_bit area=0x84 db=1 byte_num=0 bit_idx=8"]
+        );
+        let err = c.write_bit(S7_AREA_DB, 1, 2, 3, true).await.unwrap_err();
+        assert_eq!(err.get_type(), Some(NOT_CONNECTED));
+        assert_eq!(
+            contexts(&err),
+            ["write_bit area=0x84 db=1 byte_num=2 bit_idx=3"]
+        );
+        let err = c.connect_rack_slot("127.0.0.1", 8, 0).await.unwrap_err();
+        assert_eq!(err.get_type(), Some(INVALID_FUN_PARAMETER));
+        assert_eq!(
+            contexts(&err),
+            ["connect_rack_slot ip=127.0.0.1 port=102 rack=8 slot=0"]
+        );
+        assert_eq!((c.last_time, c.chunks, c.confirmed), (0.0, 0, 0));
+    }
+
+    #[test]
+    fn setters_validate_like_sync() {
+        let mut c = AsyncS7Client::new();
+        let err = c.set_connection_port(0).unwrap_err();
+        assert_eq!(contexts(&err), ["set_connection_port port=0"]);
+        let err = c.set_timeout(0, 1, 1).unwrap_err();
+        assert_eq!(
+            contexts(&err),
+            ["set_timeout co_timeout_ms=0 rd_timeout_ms=1 wr_timeout_ms=1"]
+        );
+        let err = c.set_connection_type(9).unwrap_err();
+        assert_eq!(err.get_type(), Some(INVALID_FUN_PARAMETER));
+        assert_eq!(contexts(&err), ["set_connection_type connection_type=9"]);
+        c.set_connection_port(1102).unwrap();
+        c.set_timeout(1, 2, 3).unwrap();
+        c.set_connection_type(rust7::CT_OP).unwrap();
+    }
+
+    #[tokio::test]
+    async fn parameter_errors_precede_the_connection_check() {
+        let mut c = AsyncS7Client::new();
+        let mut buffer = vec![0; 0x200000 - 65535 + 1];
+        for (area, start, wordlen, len) in [
+            (0x80, 0, S7_WL_BYTE, 1),
+            (0x85, 0, S7_WL_BYTE, 1),
+            (S7_AREA_DB, 0, 3, 1),
+            (S7_AREA_DB, 65535, S7_WL_BYTE, buffer.len()),
+        ] {
+            let read = c
+                .read_area(area, 1, start, wordlen, &mut buffer[..len])
+                .await;
+            assert_eq!(read.unwrap_err().get_type(), Some(INVALID_FUN_PARAMETER));
+            let write = c.write_area(area, 1, start, wordlen, &buffer[..len]).await;
+            assert_eq!(write.unwrap_err().get_type(), Some(INVALID_FUN_PARAMETER));
+        }
+        for connected in [false, true] {
+            c.connected = connected;
+            let bit = c.read_bit(S7_AREA_MK, 0, 1, 7).await;
+            assert_eq!(bit.unwrap_err().get_type(), Some(NOT_CONNECTED));
+            let read = c.read_area(S7_AREA_PE, 0, 0, S7_WL_BYTE, &mut [0]).await;
+            assert_eq!(read.unwrap_err().get_type(), Some(NOT_CONNECTED));
+            let write = c.write_area(S7_AREA_PA, 0, 0, S7_WL_BYTE, &[0]).await;
+            assert_eq!(write.unwrap_err().get_type(), Some(NOT_CONNECTED));
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolvable_address_is_an_io_error_with_connect_context() {
+        let mut c = AsyncS7Client::new();
+        let err = c.connect_s71200_1500("plc\0host").await.unwrap_err();
+        assert_eq!(err.get_type(), Some(rust7::kind::IO));
+        assert_eq!(
+            contexts(&err),
+            ["connect_s71200_1500 ip=plc\0host port=102"]
+        );
+        assert!(!c.connected);
+    }
+
+    #[test]
+    fn a_future_that_is_never_polled_has_no_effect() {
+        let mut c = AsyncS7Client::new();
+        c.chunks = 9;
+        drop(c.read_db(1, 0, &mut [0; 2]));
+        assert_eq!(c.chunks, 9);
+    }
+}

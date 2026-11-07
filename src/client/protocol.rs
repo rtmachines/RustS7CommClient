@@ -628,5 +628,8 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
     Ok(())
 }
 
+#[cfg(feature = "tokio")]
+pub(super) mod async_io;
+
 #[cfg(test)]
 mod tests;
