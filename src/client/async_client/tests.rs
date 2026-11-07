@@ -73,6 +73,10 @@ async fn connect_records_the_write_timeout_of_the_session() {
         client.set_timeout(1000, 1000, 7).unwrap();
         assert_eq!(client.session_timeouts().write, MS(wr_timeout_ms));
         client.disconnect();
-        server.await.unwrap();
+        // The server returns once the socket is closed.
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("disconnect must close the socket")
+            .unwrap();
     }
 }

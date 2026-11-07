@@ -88,6 +88,10 @@ fn respond(request: &[u8], plc: Plc) -> Vec<u8> {
     data_frame(&pdu)
 }
 
+/// Requests a scripted PLC answers before it closes the stream. Every transfer
+/// here needs far fewer; the bound turns a transfer that never ends into an error.
+const MAX_REQUESTS: usize = 64;
+
 /// Synchronous scripted PLC: answers each complete request written to it.
 struct SyncPlc {
     plc: Plc,
@@ -116,7 +120,9 @@ impl Write for SyncPlc {
                 break;
             }
             let request: Vec<u8> = self.inbox.drain(..len).collect();
-            self.outbox.extend(respond(&request, self.plc));
+            if self.requests.len() < MAX_REQUESTS {
+                self.outbox.extend(respond(&request, self.plc));
+            }
             self.requests.push(request);
         }
         Ok(buf.len())
@@ -146,7 +152,7 @@ impl FrameRead for SyncPlc {
 /// Returns the requests it received once the client end is closed.
 async fn async_plc(mut io: DuplexStream, plc: Plc) -> Vec<Vec<u8>> {
     let mut requests = Vec::new();
-    loop {
+    while requests.len() < MAX_REQUESTS {
         let mut header = [0; 4];
         if io.read_exact(&mut header).await.is_err() {
             return requests;
@@ -161,6 +167,7 @@ async fn async_plc(mut io: DuplexStream, plc: Plc) -> Vec<Vec<u8>> {
         }
         requests.push(request);
     }
+    requests
 }
 
 struct Outcome {
