@@ -251,7 +251,8 @@ testami, (2) testy async_io → implementacja, (3) testy API → klient,
 ## 6. Dokumentacja
 
 - `CHANGELOG.md`, `[0.2.0] - Unreleased`, `### Added`: feature `tokio`,
-  `AsyncS7Client`, cancel-safety, różnice timeoutów i wymaganie runtime'u.
+  `AsyncS7Client`, cancel-safety, różnice timeoutów i wymaganie runtime'u,
+  a także przykład `sdk_async_client` i sekcja klienta async w `doc/Documentation.md`.
 - `README.md`: sekcja „Async (tokio)” z przykładem `rust,no_run`. Ponieważ README
   jest dokumentacją crate'a (`include_str!`), przykład ma ukryte linie
   `# #[cfg(feature = "tokio")]` przed `#[tokio::main(flavor = "current_thread")]` oraz
@@ -261,8 +262,18 @@ testami, (2) testy async_io → implementacja, (3) testy API → klient,
   dokumentacji metod `S7Client` (sekcje Errors/Notes są wspólne, więc opisuję tylko
   różnice, żeby nie kopiować ~300 linii).
 - `AGENTS.md`: dopisane warianty komend z `--features tokio`, `cargo tree -e normal`
-  oraz ograniczenia klienta async (zatwierdzone).
-- `doc/Documentation.md` i przykłady bez zmian (poza zakresem).
+  oraz ograniczenia klienta async (zatwierdzone). Wiersz `cargo check --all-targets`
+  wspomina, że `sdk_async_client` buduje się tylko z `--features tokio`.
+- `doc/Documentation.md`: sekcja „Async client (feature `tokio`)”: włączenie feature'a
+  i wymagany runtime, które metody są async, workflow z ponownym połączeniem,
+  anulowanie przez `tokio::time::timeout` i różnice timeoutów. Fragmenty kodu
+  skompilowano z crate'em.
+- Przykład `examples/sdk/async_client.rs`: odpowiednik `client.rs` na
+  `AsyncS7Client`, z dodatkowym odczytem ograniczonym przez `tokio::time::timeout`.
+  W `Cargo.toml` jest zarejestrowany jako `[[example]] sdk_async_client` z
+  `required-features = ["tokio"]`. Łączy się z rzeczywistym PLC, więc jest tylko
+  budowany (`cargo build --example sdk_async_client --features tokio`), nie
+  uruchamiany. `examples/README.md` i `examples/sdk/README.md` podają tę komendę.
 
 ## Znane ograniczenia (zamierzone)
 
