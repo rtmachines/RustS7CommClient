@@ -156,3 +156,98 @@ fn invalid_area_keeps_active_session() {
     assert_eq!(client.pdu_length, 125);
     assert!(client.limits.is_some());
 }
+
+#[test]
+fn default_client_has_documented_settings() {
+    let client = S7Client::default();
+    assert_eq!(client.port, 102);
+    assert_eq!(
+        (
+            client.co_timeout_ms,
+            client.rd_timeout_ms,
+            client.wr_timeout_ms
+        ),
+        (3000, 1000, 500)
+    );
+    assert_eq!(client.conn_type, CT_PG);
+    assert!(!client.connected && client.stream.is_none() && client.limits.is_none());
+    assert_eq!(
+        (
+            client.pdu_length,
+            client.reference,
+            client.last_time,
+            client.chunks,
+            client.confirmed
+        ),
+        (0, 0, 0.0, 0, 0)
+    );
+}
+
+#[test]
+fn connection_type_accepts_only_pg_op_and_s7() {
+    let mut client = S7Client::new();
+    for connection_type in [CT_OP, CT_S7, CT_PG, CT_S7] {
+        client.set_connection_type(connection_type).unwrap();
+        assert_eq!(client.conn_type, connection_type);
+    }
+    for connection_type in [0, CT_S7 + 1, u16::MAX] {
+        assert_kind(
+            &client.set_connection_type(connection_type),
+            kind::INVALID_FUN_PARAMETER,
+        );
+        assert_eq!(client.conn_type, CT_S7, "a rejected value is not stored");
+    }
+}
+
+#[test]
+fn every_timeout_must_be_positive() {
+    let mut client = S7Client::new();
+    client.set_timeout(1, 1, 1).unwrap();
+    for (co, rd, wr) in [(0, 7, 7), (7, 0, 7), (7, 7, 0), (0, 0, 0)] {
+        assert_kind(&client.set_timeout(co, rd, wr), kind::INVALID_FUN_PARAMETER);
+        assert_eq!(
+            (
+                client.co_timeout_ms,
+                client.rd_timeout_ms,
+                client.wr_timeout_ms
+            ),
+            (1, 1, 1),
+            "({co}, {rd}, {wr}) must not be stored"
+        );
+    }
+    client.set_timeout(u64::MAX, 2, 3).unwrap();
+    assert_eq!(
+        (
+            client.co_timeout_ms,
+            client.rd_timeout_ms,
+            client.wr_timeout_ms
+        ),
+        (u64::MAX, 2, 3)
+    );
+}
+
+#[test]
+fn connection_port_must_be_nonzero() {
+    let mut client = S7Client::new();
+    assert_kind(&client.set_connection_port(0), kind::INVALID_FUN_PARAMETER);
+    assert_eq!(client.port, 102);
+    for port in [1, 65535] {
+        client.set_connection_port(port).unwrap();
+        assert_eq!(client.port, port);
+    }
+}
+
+#[test]
+fn invalid_write_area_keeps_active_session() {
+    let mut client = S7Client::new();
+    client.connected = true;
+    client.pdu_length = 125;
+    client.limits = Some(protocol::PduLimits::new(125).unwrap());
+    for area in [0x80, 0x85] {
+        let result = client.write_area(area, 1, 0, S7_WL_BYTE, &[0; 2]);
+        assert_kind(&result, kind::INVALID_FUN_PARAMETER);
+        assert!(client.connected);
+        assert_eq!(client.pdu_length, 125);
+        assert!(client.limits.is_some());
+    }
+}

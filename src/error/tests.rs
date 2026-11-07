@@ -208,3 +208,16 @@ fn kind_values_are_stable() {
         ]
     );
 }
+
+// `assert_kind` backs many tests; it must fail for success and for another kind.
+#[test]
+#[should_panic(expected = "expected error of kind rust7::Io, got Ok")]
+fn assert_kind_rejects_success() {
+    assert_kind(&Ok::<(), AnyError>(()), kind::IO);
+}
+
+#[test]
+#[should_panic(expected = "expected error of kind rust7::Io, got Some(\"rust7::NotConnected\")")]
+fn assert_kind_rejects_another_kind() {
+    assert_kind(&Err::<(), _>(not_connected()), kind::IO);
+}

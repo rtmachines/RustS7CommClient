@@ -130,3 +130,44 @@ mod glob_import {
         assert!(parse(false).is_err());
     }
 }
+
+#[test]
+fn parameter_errors_precede_the_connection_check() {
+    use rust7::kind::{INVALID_FUN_PARAMETER, NOT_CONNECTED};
+    let mut client = S7Client::new();
+    let mut buffer = vec![0; 0x200000 - 65535 + 1];
+    for (area, start, wordlen, len) in [
+        (0x80, 0, rust7::S7_WL_BYTE, 1),
+        (0x85, 0, rust7::S7_WL_BYTE, 1),
+        (rust7::S7_AREA_DB, 0, 3, 1),
+        (rust7::S7_AREA_DB, 65535, rust7::S7_WL_BYTE, buffer.len()),
+    ] {
+        let read = client.read_area(area, 1, start, wordlen, &mut buffer[..len]);
+        assert_eq!(read.unwrap_err().get_type(), Some(INVALID_FUN_PARAMETER));
+        let write = client.write_area(area, 1, start, wordlen, &buffer[..len]);
+        assert_eq!(write.unwrap_err().get_type(), Some(INVALID_FUN_PARAMETER));
+    }
+    // Valid parameters reach the connection check, also when only `connected` is set.
+    for connected in [false, true] {
+        client.connected = connected;
+        let bit = client.read_bit(rust7::S7_AREA_MK, 0, 1, 7);
+        assert_eq!(bit.unwrap_err().get_type(), Some(NOT_CONNECTED));
+        let read = client.read_area(rust7::S7_AREA_PE, 0, 0, rust7::S7_WL_BYTE, &mut [0]);
+        assert_eq!(read.unwrap_err().get_type(), Some(NOT_CONNECTED));
+        let write = client.write_area(rust7::S7_AREA_PA, 0, 0, rust7::S7_WL_BYTE, &[0]);
+        assert_eq!(write.unwrap_err().get_type(), Some(NOT_CONNECTED));
+    }
+}
+
+#[test]
+fn unresolvable_address_is_an_io_error_with_connect_context() {
+    // A NUL byte fails name resolution locally, without a DNS query or socket.
+    let mut client = S7Client::new();
+    let err = client.connect_s71200_1500("plc\0host").unwrap_err();
+    assert_eq!(err.get_type(), Some(rust7::kind::IO));
+    assert_eq!(
+        contexts(&err),
+        ["connect_s71200_1500 ip=plc\0host port=102"]
+    );
+    assert!(!client.connected);
+}

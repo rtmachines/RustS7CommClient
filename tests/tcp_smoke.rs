@@ -1,5 +1,5 @@
 //! Run explicitly: cargo test --test tcp_smoke -- --ignored
-use rust7::{kind, S7Client, S7_AREA_DB};
+use rust7::{kind, S7Client, CT_OP, CT_S7, S7_AREA_DB};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
@@ -15,6 +15,22 @@ fn assert_kind<T>(result: &rust7::Result<T>, expected: &str) {
             e.get_type()
         ),
     }
+}
+
+fn contexts(e: &rust7::AnyError) -> Vec<String> {
+    let value = serde_json::to_value(e).unwrap();
+    value["context"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A loopback port with no listener, so connecting is refused.
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback sockets required");
+    listener.local_addr().unwrap().port()
 }
 
 fn frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -79,6 +95,11 @@ enum Scenario {
     MidFrameClose,
     S7300,
     Tsap,
+    /// Connection type, rack, slot and the remote TSAP the client must send.
+    RackSlot(u16, u16, u16, u16),
+    NoConfirm,
+    FailedReconnect,
+    Dropped,
     Slow,
     SlowDrip,
 }
@@ -106,6 +127,10 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
     let [local_hi, local_lo, remote_hi, remote_lo] = match scenario {
         Scenario::Tsap => [0x10, 0x00, 0x03, 0x01],
         Scenario::S7300 => [1, 0, 1, 2],
+        Scenario::RackSlot(_, _, _, tsap) => {
+            let [hi, lo] = tsap.to_be_bytes();
+            [1, 0, hi, lo]
+        }
         _ => [1, 0, 1, 0],
     };
     assert_eq!(
@@ -118,6 +143,9 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         _ => 10,
     };
     let tpdu_limit = 1usize << exponent;
+    if scenario == Scenario::NoConfirm {
+        return Ok(()); // Close instead of confirming the ISO connection.
+    }
     let cc = [
         3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, exponent, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
     ];
@@ -302,6 +330,10 @@ fn run(scenario: Scenario) {
         let result = match scenario {
             Scenario::S7300 => client.connect_s7300("127.0.0.1"),
             Scenario::Tsap => client.connect_tsap("127.0.0.1", 0x1000, 0x0301),
+            Scenario::RackSlot(connection_type, rack, slot, _) => {
+                client.set_connection_type(connection_type).unwrap();
+                client.connect_rack_slot("127.0.0.1", rack, slot)
+            }
             _ => client.connect_s71200_1500("127.0.0.1"),
         };
         if matches!(
@@ -370,7 +402,35 @@ fn run(scenario: Scenario) {
             assert!(!client.connected);
             assert_eq!(client.pdu_length, 0);
             assert_kind(&client.read_db(100, 0, &mut [0; 4]), kind::NOT_CONNECTED);
-        } else if matches!(scenario, Scenario::S7300 | Scenario::Tsap) {
+        } else if scenario == Scenario::NoConfirm {
+            assert_kind(&result, kind::CONNECTION_CLOSED);
+            assert!(!client.connected);
+            assert_eq!(client.pdu_length, 0);
+            assert_kind(&client.read_db(100, 0, &mut [0]), kind::NOT_CONNECTED);
+        } else if scenario == Scenario::FailedReconnect {
+            result.unwrap();
+            let refused = closed_port();
+            client.set_connection_port(refused).unwrap();
+            let result = client.connect_s7300("127.0.0.1");
+            assert_kind(&result, kind::IO);
+            assert_eq!(
+                contexts(&result.unwrap_err()),
+                [format!("connect_s7300 ip=127.0.0.1 port={refused}")]
+            );
+            // The previous session is closed first: the server sees end of stream.
+            assert!(!client.connected);
+            assert_eq!(client.pdu_length, 0);
+            assert_kind(&client.read_db(100, 0, &mut [0]), kind::NOT_CONNECTED);
+        } else if scenario == Scenario::Dropped {
+            result.unwrap();
+            drop(client);
+            // The server returns only once it reads end of stream (2 s read timeout otherwise).
+            server.join().unwrap().unwrap();
+            return;
+        } else if matches!(
+            scenario,
+            Scenario::S7300 | Scenario::Tsap | Scenario::RackSlot(..)
+        ) {
             result.unwrap();
             assert!(client.connected);
             assert_eq!(client.pdu_length, 240);
@@ -529,4 +589,68 @@ fn last_time_reports_job_duration_in_milliseconds() {
 #[ignore = "requires permission to open loopback sockets"]
 fn trickling_reply_is_bounded_by_the_frame_deadline() {
     run(Scenario::SlowDrip);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn connection_type_and_rack_slot_select_the_remote_tsap() {
+    // Remote TSAP: connection type in the high byte, rack in bits 7..5, slot in bits 4..0.
+    for scenario in [
+        Scenario::RackSlot(CT_OP, 1, 3, 0x0223),
+        Scenario::RackSlot(CT_S7, 7, 31, 0x03ff),
+        Scenario::RackSlot(CT_S7, 0, 0, 0x0300),
+    ] {
+        run(scenario);
+    }
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn close_before_connection_confirm_leaves_client_disconnected() {
+    run(Scenario::NoConfirm);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn failed_connect_closes_the_previous_session() {
+    run(Scenario::FailedReconnect);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn dropping_a_connected_client_closes_the_connection() {
+    run(Scenario::Dropped);
+}
+
+#[test]
+#[ignore = "requires permission to open loopback sockets"]
+fn refused_connection_is_an_io_error_with_one_connect_context() {
+    let port = closed_port();
+    let mut client = S7Client::new();
+    client.set_connection_port(port).unwrap();
+    let ip = "127.0.0.1";
+    let cases: [(rust7::Result<()>, String); 4] = [
+        (
+            client.connect_s71200_1500(ip),
+            format!("connect_s71200_1500 ip={ip} port={port}"),
+        ),
+        (
+            client.connect_s7300(ip),
+            format!("connect_s7300 ip={ip} port={port}"),
+        ),
+        (
+            client.connect_rack_slot(ip, 0, 1),
+            format!("connect_rack_slot ip={ip} port={port} rack=0 slot=1"),
+        ),
+        (
+            client.connect_tsap(ip, 0x0100, 0x0102),
+            format!("connect_tsap ip={ip} port={port} local_tsap=0x0100 remote_tsap=0x0102"),
+        ),
+    ];
+    for (result, context) in cases {
+        assert_kind(&result, kind::IO);
+        assert_eq!(contexts(&result.unwrap_err()), [context]);
+    }
+    assert!(!client.connected);
+    assert_eq!(client.pdu_length, 0);
 }

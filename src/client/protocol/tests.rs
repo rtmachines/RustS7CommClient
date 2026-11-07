@@ -10,6 +10,8 @@ struct Scripted {
     writes: Vec<u8>,
     delay: Duration,
     timeouts: Vec<Duration>,
+    write_error: Option<io::ErrorKind>,
+    limit_error: Option<io::ErrorKind>,
 }
 
 impl Scripted {
@@ -42,7 +44,10 @@ impl Read for Scripted {
 impl FrameRead for Scripted {
     fn limit_next_read(&mut self, timeout: Duration) -> io::Result<()> {
         self.timeouts.push(timeout);
-        Ok(())
+        match self.limit_error {
+            Some(kind) => Err(kind.into()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -54,11 +59,47 @@ impl<T: AsRef<[u8]>> FrameRead for Cursor<T> {
 
 impl Write for Scripted {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(kind) = self.write_error {
+            return Err(kind.into());
+        }
         self.writes.extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Bytes still queued for reading.
+fn unread(io: &Scripted) -> usize {
+    io.reads
+        .iter()
+        .map(|r| r.as_ref().map_or(0, Vec::len))
+        .sum()
+}
+
+/// `validate_connection_confirm` on a watchdog thread: an option walk that stops
+/// advancing fails the test instead of hanging the whole suite. After one hang,
+/// later calls fail at once, so property shrinking cannot stall either.
+fn confirm(frame: &[u8]) -> Result<u16> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HUNG: AtomicBool = AtomicBool::new(false);
+    assert!(
+        !HUNG.load(Ordering::Relaxed),
+        "validate_connection_confirm did not return earlier"
+    );
+    let frame = frame.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(validate_connection_confirm(&frame));
+    });
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            HUNG.store(true, Ordering::Relaxed);
+            panic!("validate_connection_confirm did not return within 2 s")
+        }
+        Err(e) => panic!("validate_connection_confirm panicked: {e}"),
     }
 }
 
@@ -198,11 +239,11 @@ fn cotp_headers_are_validated() {
         assert!(data_payload(&frame[..len]).is_err());
     }
     let cc = tpkt(&[6, 0xd0, 0, 1, 0, 1, 0]);
-    validate_connection_confirm(&cc).unwrap();
+    confirm(&cc).unwrap();
     let cc_with_options = tpkt(&[9, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, 10]);
-    validate_connection_confirm(&cc_with_options).unwrap();
+    confirm(&cc_with_options).unwrap();
     let bad_tlv = tpkt(&[9, 0xd0, 0, 1, 0, 1, 0, 0xc0, 2, 10]);
-    assert!(validate_connection_confirm(&bad_tlv).is_err());
+    assert!(confirm(&bad_tlv).is_err());
 }
 
 /// Copies of `frame` that differ from it only in one TPKT header field.
@@ -222,10 +263,7 @@ fn frames_with_inconsistent_tpkt_header_are_rejected() {
         assert_kind(&data_payload(&bad), kind::ISO_INVALID_HEADER);
     }
     for bad in bad_tpkt_headers(&connection_confirm(&[])) {
-        assert_kind(
-            &validate_connection_confirm(&bad),
-            kind::ISO_CONNECTION_FAILED,
-        );
+        assert_kind(&confirm(&bad), kind::ISO_CONNECTION_FAILED);
     }
 }
 
@@ -324,7 +362,7 @@ fn cotp_limit_caps_setup_offer() {
         (vec![0xc0, 1, 10], 480),
         (vec![], 480),
     ] {
-        let tpdu_limit = validate_connection_confirm(&connection_confirm(&options)).unwrap();
+        let tpdu_limit = confirm(&connection_confirm(&options)).unwrap();
         for accepted in [29, requested - 1, requested] {
             let mut io = Scripted::pieces([negotiation_response(accepted)]);
             let limits = negotiate(&mut io, tpdu_limit, Duration::from_secs(1)).unwrap();
@@ -380,19 +418,19 @@ fn minimum_pdu_writes_one_byte_per_chunk() {
 #[test]
 fn connection_confirm_rejects_each_invalid_field() {
     let good = tpkt(&[6, 0xd0, 0, 1, 0x12, 0x34, 0]);
-    validate_connection_confirm(&good).unwrap(); // Any source reference is accepted.
+    confirm(&good).unwrap(); // Any source reference is accepted.
     for (index, value) in [(4, 7), (5, 0xe0), (5, 0xd1), (7, 2), (10, 0x10)] {
         let mut bad = good.clone();
         bad[index] = value;
         assert!(
             matches!(
-                validate_connection_confirm(&bad),
+                confirm(&bad),
                 Err(ref e) if e.get_type() == Some(kind::ISO_CONNECTION_FAILED)
             ),
             "index {index}"
         );
     }
-    assert!(validate_connection_confirm(&tpkt(&[7, 0xd0, 0, 1, 0, 1, 0, 0xc0])).is_err());
+    assert!(confirm(&tpkt(&[7, 0xd0, 0, 1, 0, 1, 0, 0xc0])).is_err());
 }
 
 fn connection_confirm(options: &[u8]) -> Vec<u8> {
@@ -403,21 +441,15 @@ fn connection_confirm(options: &[u8]) -> Vec<u8> {
 
 #[test]
 fn connection_confirm_returns_effective_tpdu_limit() {
+    assert_eq!(confirm(&connection_confirm(&[])).unwrap(), 1024);
     assert_eq!(
-        validate_connection_confirm(&connection_confirm(&[])).unwrap(),
-        1024
-    );
-    assert_eq!(
-        validate_connection_confirm(&connection_confirm(&[0xc1, 2, 1, 0])).unwrap(),
+        confirm(&connection_confirm(&[0xc1, 2, 1, 0])).unwrap(),
         1024
     );
     // A zero-length option may end the frame.
+    assert_eq!(confirm(&connection_confirm(&[0xc1, 0])).unwrap(), 1024);
     assert_eq!(
-        validate_connection_confirm(&connection_confirm(&[0xc1, 0])).unwrap(),
-        1024
-    );
-    assert_eq!(
-        validate_connection_confirm(&connection_confirm(&[0xc0, 1, 9, 0xc1, 0])).unwrap(),
+        confirm(&connection_confirm(&[0xc0, 1, 9, 0xc1, 0])).unwrap(),
         512
     );
     for (exponent, expected) in [(7, 128), (8, 256), (9, 512), (10, 1024)] {
@@ -425,10 +457,7 @@ fn connection_confirm_returns_effective_tpdu_limit() {
             vec![0xc0, 1, exponent],
             vec![0xc1, 2, 1, 0, 0xc0, 1, exponent, 0xc2, 2, 1, 2],
         ] {
-            assert_eq!(
-                validate_connection_confirm(&connection_confirm(&options)).unwrap(),
-                expected
-            );
+            assert_eq!(confirm(&connection_confirm(&options)).unwrap(), expected);
         }
     }
 }
@@ -450,7 +479,7 @@ fn connection_confirm_rejects_invalid_tpdu_options() {
     ] {
         assert!(
             matches!(
-                validate_connection_confirm(&connection_confirm(&options)),
+                confirm(&connection_confirm(&options)),
                 Err(ref e) if e.get_type() == Some(kind::ISO_CONNECTION_FAILED)
             ),
             "options {options:02x?}"
@@ -1368,6 +1397,536 @@ mod properties {
             } else {
                 prop_assert!(result.is_err());
             }
+        }
+    }
+}
+
+const SECOND: Duration = Duration::from_secs(1);
+
+#[test]
+fn negotiation_reports_transport_errors_unchanged() {
+    // A failed send is an I/O error and no reply is consumed.
+    let mut io = Scripted::pieces([negotiation_response(480)]);
+    io.write_error = Some(io::ErrorKind::BrokenPipe);
+    assert_kind(&negotiate(&mut io, 1024, SECOND), kind::IO);
+    assert_eq!(unread(&io), 27);
+    // The peer closing before the Setup Communication reply ends the stream.
+    let mut io = Scripted::default();
+    assert_kind(&negotiate(&mut io, 1024, SECOND), kind::CONNECTION_CLOSED);
+    assert_eq!(io.writes.len(), 25);
+}
+
+#[test]
+fn read_tpkt_length_limit_is_inclusive() {
+    for (len, accepted) in [(486u16, true), (487, true), (488, false)] {
+        let header = [3, 0, (len >> 8) as u8, len as u8];
+        let body = vec![0x5a; usize::from(len) - 4];
+        let mut io = Scripted::pieces([header.to_vec(), body.clone()]);
+        let result = read_tpkt(&mut io, 487, SECOND);
+        if accepted {
+            assert_eq!(result.unwrap(), [&header[..], &body].concat());
+            assert_eq!(unread(&io), 0);
+        } else {
+            assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+            assert_eq!(unread(&io), body.len(), "the body must stay unread");
+        }
+    }
+    for header in [[2, 0, 0, 10], [3, 1, 0, 10]] {
+        let mut io = Scripted::pieces([header.to_vec(), vec![0; 6]]);
+        assert_kind(&read_tpkt(&mut io, 487, SECOND), kind::ISO_INVALID_HEADER);
+        assert_eq!(unread(&io), 6);
+    }
+}
+
+#[test]
+fn unrepresentable_deadline_bounds_each_read_by_the_timeout() {
+    let frame = data_frame(&[0x32; 20]);
+    let mut io = Scripted::pieces([frame[..4].to_vec(), frame[4..].to_vec()]);
+    assert_eq!(read_tpkt(&mut io, 487, Duration::MAX).unwrap(), frame);
+    assert_eq!(io.timeouts, [Duration::MAX, Duration::MAX]);
+}
+
+#[test]
+fn failure_to_bound_a_read_is_an_io_error_before_reading() {
+    let frame = data_frame(&[0x32]);
+    let mut io = Scripted::pieces([frame.clone()]);
+    io.limit_error = Some(io::ErrorKind::InvalidInput);
+    assert_kind(&read_tpkt(&mut io, 487, SECOND), kind::IO);
+    assert_eq!(unread(&io), frame.len());
+}
+
+#[test]
+fn read_response_shape_is_fixed_by_wordlen() {
+    // Bit access reads exactly one element; a bit-shaped item cannot stand for two bytes.
+    let two_bits = ack(1, 4, &[0xff, 3, 0, 1, 7, 7]);
+    assert_kind(
+        &validate_read_response(&two_bits, 1, 1, 2),
+        kind::ISO_INVALID_TELEGRAM,
+    );
+    let bit = read_ack(1, &[1], true);
+    for wordlen in [0, 3, 0xff] {
+        assert_kind(
+            &validate_read_response(&bit, 1, wordlen, 1),
+            kind::ISO_INVALID_TELEGRAM,
+        );
+    }
+    // A byte count whose bit length overflows is rejected, not wrapped.
+    let bytes = read_ack(1, &[0; 4], false);
+    assert_kind(
+        &validate_read_response(&bytes, 1, 2, usize::MAX / 8 + 1),
+        kind::ISO_INVALID_TELEGRAM,
+    );
+}
+
+#[test]
+fn address_limits_accept_the_last_address_and_reject_the_next() {
+    // Bit access: 24-bit bit address, so 0xffffff is the last valid start.
+    for (start, expected) in [(0xfffffe, Some(1)), (0xffffff, Some(1)), (0x1000000, None)] {
+        assert_eq!(
+            validate_transfer(start, 1, 1).ok(),
+            expected,
+            "bit {start:#x}"
+        );
+    }
+    // Byte access: the last byte may be 0x1fffff (bit address 0xfffff8).
+    for (start, len, expected) in [
+        (0x1ffffe, 2, Some(2)),
+        (0x1ffffe, 3, None),
+        (0x1fffff, 1, Some(1)),
+        (0x1fffff, 0, Some(0)),
+        (0x200000, 0, None),
+        (0, 0x200000, Some(0x200000)),
+        (0, 0x200001, None),
+    ] {
+        assert_eq!(
+            validate_transfer(start, 2, len).ok(),
+            expected,
+            "byte {start:#x}+{len:#x}"
+        );
+    }
+}
+
+#[test]
+fn byte_range_overflow_is_an_invalid_parameter() {
+    for (start, len) in [(2, usize::MAX), (0x1fffff, usize::MAX - 1)] {
+        assert_kind(
+            &validate_transfer(start, 2, len),
+            kind::INVALID_FUN_PARAMETER,
+        );
+    }
+}
+
+#[test]
+fn db_number_is_sent_only_for_the_db_area() {
+    let limits = PduLimits::new(480).unwrap();
+    for (area, db) in [(0x81, 0u16), (0x82, 0), (0x83, 0), (0x84, 100)] {
+        let mut io = Scripted::pieces([
+            data_frame(&read_ack(1, &[7], false)),
+            data_frame(&ack(2, 5, &[0xff])),
+        ]);
+        let mut reference = 0;
+        let mut progress = Progress::default();
+        let at = |start| Transfer {
+            area,
+            db_number: 100,
+            start,
+            wordlen: 2,
+        };
+        read_transfer(
+            &mut io,
+            &limits,
+            &mut reference,
+            at(3),
+            &mut [0],
+            &mut progress,
+            SECOND,
+        )
+        .unwrap();
+        write_transfer(
+            &mut io,
+            &limits,
+            &mut reference,
+            at(3),
+            &[9],
+            &mut progress,
+            SECOND,
+        )
+        .unwrap();
+        for packet in requests(&io) {
+            assert_eq!(&packet[25..27], &db.to_be_bytes(), "area {area:#04x}");
+            assert_eq!(packet[27], area);
+        }
+    }
+}
+
+fn run_transfer(
+    io: &mut Scripted,
+    writing: bool,
+    transfer: Transfer,
+    buffer: &mut [u8],
+) -> (Result<()>, Progress, u16) {
+    let limits = PduLimits::new(29).unwrap();
+    let mut reference = 0;
+    let mut progress = Progress::default();
+    let result = if writing {
+        write_transfer(
+            io,
+            &limits,
+            &mut reference,
+            transfer,
+            buffer,
+            &mut progress,
+            SECOND,
+        )
+    } else {
+        read_transfer(
+            io,
+            &limits,
+            &mut reference,
+            transfer,
+            buffer,
+            &mut progress,
+            SECOND,
+        )
+    };
+    (result, progress, reference)
+}
+
+#[test]
+fn transfers_reject_unknown_area_before_io() {
+    for writing in [false, true] {
+        for (area, valid) in [
+            (0x00, false),
+            (0x80, false),
+            (0x81, true),
+            (0x82, true),
+            (0x83, true),
+            (0x84, true),
+            (0x85, false),
+            (0xff, false),
+        ] {
+            let reply = data_frame(&if writing {
+                ack(1, 5, &[0xff])
+            } else {
+                read_ack(1, &[7], false)
+            });
+            let mut io = Scripted::pieces([reply]);
+            let transfer = Transfer {
+                area,
+                db_number: 1,
+                start: 0,
+                wordlen: 2,
+            };
+            let (result, progress, reference) = run_transfer(&mut io, writing, transfer, &mut [0]);
+            if valid {
+                result.unwrap();
+                assert_eq!((progress.chunks, progress.confirmed, reference), (1, 1, 1));
+            } else {
+                assert_kind(&result, kind::INVALID_FUN_PARAMETER);
+                assert!(io.writes.is_empty(), "area {area:#04x}");
+                assert_eq!((progress.chunks, progress.confirmed, reference), (0, 0, 0));
+                assert_eq!(unread(&io), io.reads[0].as_ref().unwrap().len());
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_send_counts_the_chunk_but_confirms_nothing() {
+    for writing in [false, true] {
+        let mut io = Scripted::pieces([data_frame(&ack(1, 5, &[0xff]))]);
+        io.write_error = Some(io::ErrorKind::ConnectionReset);
+        let mut buffer = [0xaa; 2];
+        let (result, progress, reference) =
+            run_transfer(&mut io, writing, transfer(0, false), &mut buffer);
+        assert_kind(&result, kind::IO);
+        assert_eq!((progress.chunks, progress.confirmed, reference), (1, 0, 1));
+        assert_eq!(buffer, [0xaa; 2]);
+        assert_eq!(unread(&io), 22, "no reply may be read after a failed send");
+    }
+}
+
+#[test]
+fn cotp_errors_in_transfer_replies_keep_their_kind() {
+    for writing in [false, true] {
+        for (index, expected) in [
+            (5, kind::ISO_INVALID_HEADER),
+            (6, kind::ISO_FRAGMENTED_PACKET),
+        ] {
+            let mut reply = data_frame(&if writing {
+                ack(1, 5, &[0xff])
+            } else {
+                read_ack(1, &[7], false)
+            });
+            reply[index] = 0;
+            let mut io = Scripted::pieces([reply]);
+            let mut buffer = [0xaa];
+            let (result, progress, _) =
+                run_transfer(&mut io, writing, transfer(0, false), &mut buffer);
+            assert_kind(&result, expected);
+            assert_eq!((progress.chunks, progress.confirmed), (1, 0));
+            assert_eq!(buffer, [0xaa]);
+        }
+    }
+}
+
+#[test]
+fn reply_frame_may_not_exceed_pdu_plus_tpkt_and_cotp_headers() {
+    // A reply carries at most `pdu_length` (29) bytes of S7 PDU behind the
+    // 4-byte TPKT and 3-byte COTP headers, so 36 bytes is the largest frame.
+    for writing in [false, true] {
+        for total in [35, 36, 37] {
+            let mut io = Scripted::pieces([data_frame(&vec![0; total - 7])]);
+            let (result, _, _) = run_transfer(&mut io, writing, transfer(0, false), &mut [0]);
+            assert_kind(&result, kind::ISO_INVALID_TELEGRAM);
+            let expected = if total <= 36 { 0 } else { total - 4 };
+            assert_eq!(unread(&io), expected, "total {total}, writing {writing}");
+        }
+    }
+}
+
+#[test]
+fn write_request_declares_item_header_plus_payload_as_data_length() {
+    let limits = PduLimits::new(480).unwrap();
+    for (bit, buffer, count) in [
+        (false, vec![1, 2, 3], 3usize),
+        (true, vec![1], 1),
+        (false, vec![9; 452], 452),
+    ] {
+        let mut io = Scripted::pieces([data_frame(&ack(1, 5, &[0xff]))]);
+        let mut reference = 0;
+        let mut progress = Progress::default();
+        write_transfer(
+            &mut io,
+            &limits,
+            &mut reference,
+            transfer(0, bit),
+            &buffer,
+            &mut progress,
+            SECOND,
+        )
+        .unwrap();
+        let packet = &requests(&io)[0];
+        // Data section: return code, transport size, 16-bit length, payload.
+        assert_eq!(&packet[15..17], &((4 + count) as u16).to_be_bytes());
+        assert_eq!(packet.len(), 31 + 4 + count);
+    }
+}
+
+mod invariants {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn is_kind<T>(result: &Result<T>, expected: &str) -> bool {
+        matches!(result, Err(e) if e.get_type() == Some(expected))
+    }
+
+    fn header_byte(valid: u8) -> impl Strategy<Value = u8> {
+        prop_oneof![3 => Just(valid), 1 => any::<u8>()]
+    }
+
+    fn tlv() -> impl Strategy<Value = Vec<u8>> {
+        (
+            any::<u8>().prop_filter("not the TPDU size code", |c| *c != 0xc0),
+            vec(any::<u8>(), 0..=4),
+        )
+            .prop_map(|(code, value)| [&[code, value.len() as u8][..], &value].concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        /// TPKT: a frame is read whole iff version 3, reserved 0 and 4 <= length <= limit;
+        /// otherwise only the 4 header bytes are consumed and the body stays queued.
+        #[test]
+        fn read_tpkt_reads_body_only_after_a_valid_header(
+            version in header_byte(3),
+            reserved in header_byte(0),
+            len in prop_oneof![0u16..=8, 480u16..=500, any::<u16>()],
+            max_total in prop_oneof![Just(487usize), 4usize..=600],
+        ) {
+            let header = [version, reserved, (len >> 8) as u8, len as u8];
+            let body = vec![0x5a; usize::from(len).saturating_sub(4)];
+            let mut io = Scripted::pieces([header.to_vec(), body.clone()]);
+            let result = read_tpkt(&mut io, max_total, SECOND);
+            if version != 3 || reserved != 0 {
+                prop_assert!(is_kind(&result, kind::ISO_INVALID_HEADER));
+                prop_assert_eq!(unread(&io), body.len());
+            } else if usize::from(len) < 4 || usize::from(len) > max_total {
+                prop_assert!(is_kind(&result, kind::ISO_INVALID_TELEGRAM));
+                prop_assert_eq!(unread(&io), body.len());
+            } else {
+                prop_assert_eq!(result.unwrap(), [&header[..], &body].concat());
+                prop_assert_eq!(unread(&io), 0);
+            }
+        }
+
+        /// COTP DT roundtrip: wrapping a nonempty S7 PDU in TPKT + DT header and unwrapping
+        /// it is the identity.
+        #[test]
+        fn data_payload_inverts_data_frame(pdu in vec(any::<u8>(), 1..=500)) {
+            let frame = data_frame(&pdu);
+            prop_assert_eq!(data_payload(&frame).unwrap(), &pdu[..]);
+        }
+
+        /// COTP DT: changing any TPKT/COTP header byte is rejected. A TPKT or DT header
+        /// change is an invalid header; a DT without the EOT bit (byte 6) is a fragment.
+        #[test]
+        fn data_payload_rejects_any_header_corruption(pdu in vec(any::<u8>(), 1..=40), index in 0usize..7, flip in 1u8..=255) {
+            let mut frame = data_frame(&pdu);
+            frame[index] ^= flip;
+            let result = data_payload(&frame);
+            if index < 6 {
+                prop_assert!(is_kind(&result, kind::ISO_INVALID_HEADER));
+            } else if frame[6] & 0x80 == 0 {
+                prop_assert!(is_kind(&result, kind::ISO_FRAGMENTED_PACKET));
+            } else {
+                // EOT set with a nonzero TPDU-NR, unused in class 0: rejected, kind unspecified.
+                prop_assert!(result.is_err());
+            }
+        }
+
+        /// CC: any well-formed option list yields 2^exponent of its single C0 option, or 1024 without one.
+        #[test]
+        fn connection_confirm_returns_the_tpdu_size_option(
+            before in vec(tlv(), 0..4),
+            exponent in proptest::option::of(7u8..=10),
+            after in vec(tlv(), 0..4),
+        ) {
+            let size = exponent.map(|e| vec![0xc0, 1, e]).unwrap_or_default();
+            let options = [before.concat(), size, after.concat()].concat();
+            let expected = exponent.map_or(1024, |e| 1u16 << e);
+            prop_assert_eq!(confirm(&connection_confirm(&options)).unwrap(), expected);
+        }
+
+        /// CC: an option cut short by the end of the frame is rejected, never read past the frame.
+        #[test]
+        fn connection_confirm_rejects_truncated_option(options in vec(tlv(), 1..4), cut in any::<prop::sample::Index>()) {
+            let last = options.last().unwrap().len();
+            let cut = 1 + cut.index(last - 1);
+            let mut bytes = options.concat();
+            bytes.truncate(bytes.len() - cut);
+            prop_assert!(is_kind(&confirm(&connection_confirm(&bytes)), kind::ISO_CONNECTION_FAILED));
+        }
+
+        /// PDU limits: 29..=480 accepted; the read payload leaves room for the 18-byte read
+        /// ACK_DATA overhead and the write payload for the 28-byte write request overhead.
+        #[test]
+        fn pdu_limits_reserve_s7_overhead(n in any::<u16>()) {
+            match PduLimits::new(n) {
+                Ok(limits) => {
+                    prop_assert!((29..=480).contains(&n));
+                    prop_assert_eq!(limits.read_payload + 18, usize::from(n));
+                    prop_assert_eq!(limits.write_payload + 28, usize::from(n));
+                }
+                Err(e) => {
+                    prop_assert!(!(29..=480).contains(&n));
+                    prop_assert_eq!(e.get_type(), Some(kind::PDU_NEGOTIATION_FAILED));
+                }
+            }
+        }
+
+        /// Address range: a bit transfer is one element at a 24-bit bit address; a byte
+        /// transfer's last byte must lie at or below 0x1fffff (its bit address fits 24 bits).
+        #[test]
+        fn validate_transfer_matches_the_24_bit_address_space(
+            start in prop_oneof![0u32..=16, 0x1ffffcu32..=0x200002, 0xfffffcu32..=0x1000002, any::<u32>()],
+            len in prop_oneof![0usize..=16, 0x1ffff0usize..=0x200010, Just(usize::MAX), any::<usize>()],
+            wordlen in prop_oneof![Just(1u8), Just(2u8), any::<u8>()],
+        ) {
+            let expected = match wordlen {
+                1 => (len > 0 && start <= 0xff_ffff).then_some(1),
+                2 => (u128::from(start) + len.max(1) as u128 - 1 <= 0x1f_ffff).then_some(len),
+                _ => None,
+            };
+            match validate_transfer(start, wordlen, len) {
+                Ok(n) => prop_assert_eq!(Some(n), expected),
+                Err(e) => {
+                    prop_assert_eq!(expected, None);
+                    prop_assert_eq!(e.get_type(), Some(kind::INVALID_FUN_PARAMETER));
+                }
+            }
+        }
+
+        /// Area: only PE, PA, MK and DB (0x81..=0x84) are accepted, and the check needs no I/O.
+        #[test]
+        fn only_the_four_s7_areas_are_accepted(area in prop_oneof![0x7fu8..=0x86, any::<u8>()], writing in any::<bool>()) {
+            let mut io = Scripted::default();
+            let transfer = Transfer { area, db_number: 1, start: 0, wordlen: 2 };
+            let (result, progress, _) = run_transfer(&mut io, writing, transfer, &mut []);
+            if (0x81..=0x84).contains(&area) {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(is_kind(&result, kind::INVALID_FUN_PARAMETER));
+            }
+            prop_assert!(io.writes.is_empty());
+            prop_assert_eq!(progress.chunks, 0);
+        }
+
+        /// TSAP: the remote TSAP decodes back to (connection type, rack, slot) for every
+        /// rack 0..=7 and slot 0..=31; anything outside is rejected.
+        #[test]
+        fn remote_tsap_decodes_to_its_fields(conn_type in 0u16..=0xff, rack in 0u16..=12, slot in 0u16..=40) {
+            match remote_tsap(conn_type, rack, slot) {
+                Ok(tsap) => {
+                    prop_assert!(rack <= 7 && slot <= 31);
+                    let [hi, lo] = tsap.to_be_bytes();
+                    prop_assert_eq!((u16::from(hi), u16::from(lo >> 5), u16::from(lo & 0x1f)), (conn_type, rack, slot));
+                }
+                Err(e) => {
+                    prop_assert!(rack > 7 || slot > 31);
+                    prop_assert_eq!(e.get_type(), Some(kind::INVALID_FUN_PARAMETER));
+                }
+            }
+        }
+
+        /// Chunking: a transfer is split into ceil(len / payload) requests with consecutive
+        /// references and addresses, each carrying min(remaining, payload) bytes, and the
+        /// chunks together reproduce the buffer exactly.
+        #[test]
+        fn transfers_split_into_consecutive_bounded_chunks(
+            pdu in 29u16..=480,
+            len in 0usize..=1500,
+            start in 0u32..=0x1000,
+            writing in any::<bool>(),
+        ) {
+            let limits = PduLimits::new(pdu).unwrap();
+            let limit = usize::from(pdu) - if writing { 28 } else { 18 };
+            let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+            let mut io = Scripted::default();
+            for (index, chunk) in data.chunks(limit).enumerate() {
+                let reference = (index + 1) as u16;
+                let pdu = if writing { ack(reference, 5, &[0xff]) } else { read_ack(reference, chunk, false) };
+                io.reads.push_back(Ok(data_frame(&pdu)));
+            }
+            let mut reference = 0;
+            let mut progress = Progress::default();
+            let mut buffer = vec![0xaa; len];
+            let at = Transfer { area: 0x84, db_number: 100, start, wordlen: 2 };
+            if writing {
+                write_transfer(&mut io, &limits, &mut reference, at, &data, &mut progress, SECOND).unwrap();
+            } else {
+                read_transfer(&mut io, &limits, &mut reference, at, &mut buffer, &mut progress, SECOND).unwrap();
+                prop_assert_eq!(&buffer, &data);
+            }
+            let packets = requests(&io);
+            prop_assert_eq!(packets.len(), len.div_ceil(limit));
+            prop_assert_eq!((progress.chunks, progress.confirmed), (packets.len(), len));
+            prop_assert_eq!(usize::from(reference), packets.len());
+            let mut offset = 0;
+            for (index, packet) in packets.iter().enumerate() {
+                let n = usize::from(u16::from_be_bytes([packet[23], packet[24]]));
+                prop_assert_eq!(n, (len - offset).min(limit));
+                prop_assert_eq!(&packet[11..13], &((index + 1) as u16).to_be_bytes());
+                prop_assert_eq!(&packet[28..31], &((start + offset as u32) * 8).to_be_bytes()[1..]);
+                if writing {
+                    prop_assert_eq!(&packet[15..17], &((n + 4) as u16).to_be_bytes());
+                    prop_assert_eq!(&packet[35..], &data[offset..offset + n]);
+                }
+                offset += n;
+            }
+            prop_assert_eq!(offset, len);
         }
     }
 }
