@@ -8,6 +8,10 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "tokio")]
+#[path = "tcp_smoke/async_client.rs"]
+mod async_client;
+
 #[track_caller]
 fn assert_kind<T>(result: &rust7::Result<T>, expected: &str) {
     match result {

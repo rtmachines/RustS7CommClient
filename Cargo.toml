@@ -22,9 +22,23 @@ path = "src/lib.rs"
 name = "sdk_client"
 path = "examples/sdk/client.rs"
 
+[[example]]
+name = "sdk_async_client"
+path = "examples/sdk/async_client.rs"
+required-features = ["tokio"]
+
+[features]
+## Asynchronous client `AsyncS7Client` on tokio.
+tokio = ["dep:tokio"]
+
 [dependencies]
 anyerror = { version = "0.1.13", default-features = false }
+tokio = { version = "1.48", optional = true, default-features = false, features = ["net", "time", "io-util"] }
 
 [dev-dependencies]
 serde_json = "1"
 proptest = { version = "1", default-features = false, features = ["std"] }
+tokio = { version = "1.48", features = ["net", "time", "io-util", "rt", "macros", "test-util"] }
+
+[package.metadata.docs.rs]
+features = ["tokio"]

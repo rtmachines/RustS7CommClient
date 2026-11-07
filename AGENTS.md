@@ -13,13 +13,24 @@ toolchainu Rust, Cargo oraz komponentów rustfmt i clippy. MSRV biblioteki to 1.
 | --- | --- |
 | Formatowanie zmian Rust | `cargo fmt --all` |
 | Kontrola formatowania | `cargo fmt --all -- --check` |
-| Kontrola kompilacji wszystkich targetów (w tym przykładu `sdk_client`) | `cargo check --all-targets` |
+| Kontrola kompilacji wszystkich targetów (w tym przykładu `sdk_client`; `sdk_async_client` tylko z `--features tokio`) | `cargo check --all-targets` |
 | Budowanie biblioteki | `cargo build` |
 | Testy jednostkowe i dokumentacji | `cargo test` |
 | Wybrany test | `cargo test <fragment_nazwy>` |
 | Testy TCP na lokalnym mocku | `cargo test --test tcp_smoke -- --ignored` |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Dokumentacja API | `cargo doc --no-deps` |
+| Klient async (feature `tokio`) | powyższe komendy check/test/tcp_smoke/clippy/doc z `--features tokio`, np. `cargo clippy --all-targets --features tokio -- -D warnings`, `cargo test --test tcp_smoke --features tokio -- --ignored` |
+| Test async łączący się z loopbackiem w bibliotece | `cargo test --lib --features tokio -- --ignored` |
+| Tokio poza drzewem bez feature'a | `cargo tree -e normal` (wynik nie może zawierać `tokio`) |
+
+Feature `tokio` jest domyślnie wyłączony. Zmiany w `src/client/protocol.rs`, `src/client/shared.rs`
+lub kliencie async sprawdzaj w obu wariantach: bez feature'a i z `--features tokio`.
+Logika protokołu (żądania, walidacja odpowiedzi, `PduLimits`, `TransferPlan`, walidacja adresów)
+jest wspólna dla `S7Client` i `AsyncS7Client`; w `protocol/async_io.rs` i `async_client.rs`
+trzymaj tylko I/O i glue. Testy async: src/client/protocol/async_io/tests.rs (duplex, bez gniazd),
+tests/tcp_smoke/async_client.rs (loopback, `--ignored`), src/client/async_client/tests.rs
+(stan prywatny; test z loopbackiem `--ignored`) i moduł `async_api` w tests/public_errors.rs.
 
 Cargo obsługuje tutaj `--offline`; używaj go, gdy potrzebne zależności są lokalnie.
 Po zmianach Rust uruchom kontrolę formatowania, Clippy oraz testy. Dla zmian
@@ -57,6 +68,10 @@ rename i sprawdź wynikowy diff.
   wcześniejsze części mogą dotrzeć do PLC przed błędem, a także część, przy której
   wystąpił błąd; potwierdzone bajty to `[0, confirmed)`. Nie dodawaj automatycznych ponowień zapisów bez rozstrzygnięcia
   ich semantyki. Po błędzie odczytu bufor nie jest kompletnym wynikiem.
+- `AsyncS7Client`: porzucenie rozpoczętego future'a musi rozłączyć klienta i zamknąć gniazdo
+  (strażnik `InFlight`); future'y metod muszą pozostać `Send`, a metody przyjmują `&mut self`
+  bez wewnętrznych blokad. Z biblioteki używaj tylko feature'ów tokio `net`, `time`, `io-util`;
+  `rt`/`macros` wyłącznie w dev-dependencies.
 - Nie uruchamiaj przykładów przeciw rzeczywistemu PLC bez wyraźnego zlecenia
   i wskazania urządzenia; do testów transportu używaj lokalnego mocka.
 - examples/docker to osobny pakiet, poza głównymi komendami Cargo; zależy od
