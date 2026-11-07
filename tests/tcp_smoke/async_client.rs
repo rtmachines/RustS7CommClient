@@ -467,3 +467,117 @@ async fn async_refused_connection_is_io_with_context() {
     );
     assert!(!client.connected);
 }
+
+/// How the mock PLC answers the handshake of a connect that must fail.
+#[derive(Clone, Copy, Debug)]
+enum Handshake {
+    /// The mock closes the socket instead of sending the connection confirm.
+    NoConfirm,
+    /// A connection request comes back instead of a connection confirm.
+    NotAConfirm,
+    /// The CPU answers with one byte more than the offered PDU (480 bytes).
+    OversizedPdu,
+}
+
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
+async fn async_failed_handshake_reports_its_kind_and_closes_the_socket() {
+    for (handshake, expected) in [
+        (Handshake::NoConfirm, kind::CONNECTION_CLOSED),
+        (Handshake::NotAConfirm, kind::ISO_CONNECTION_FAILED),
+        (Handshake::OversizedPdu, kind::PDU_NEGOTIATION_FAILED),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback sockets required");
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _cr = frame(&mut stream).await.unwrap();
+            let mut cc = [
+                3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, 10, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
+            ];
+            match handshake {
+                Handshake::NoConfirm => return None,
+                Handshake::NotAConfirm => {
+                    cc[5] = 0xe0;
+                    stream.write_all(&cc).await.unwrap();
+                }
+                Handshake::OversizedPdu => {
+                    stream.write_all(&cc).await.unwrap();
+                    let pn = frame(&mut stream).await.unwrap();
+                    let mut response = vec![
+                        3, 0, 0, 27, 2, 0xf0, 0x80, 0x32, 3, 0, 0, pn[11], pn[12], 0, 8, 0, 0, 0,
+                        0, 0xf0, 0, 0, 1, 0, 1, 0, 0,
+                    ];
+                    response[25..27].copy_from_slice(&481u16.to_be_bytes());
+                    stream.write_all(&response).await.unwrap();
+                }
+            }
+            Some(wait_for_close(&mut stream).await)
+        });
+        let mut client = AsyncS7Client::new();
+        client.set_connection_port(port).unwrap();
+        client.set_timeout(1000, 1000, 1000).unwrap();
+        let result = client.connect_tsap("127.0.0.1", 0x1000, 0x0301).await;
+        assert_kind(&result, expected);
+        assert_eq!(
+            contexts(&result.unwrap_err()),
+            [format!(
+                "connect_tsap ip=127.0.0.1 port={port} local_tsap=0x1000 remote_tsap=0x0301"
+            )],
+            "{handshake:?}"
+        );
+        assert!(!client.connected, "{handshake:?}");
+        assert_eq!(
+            (client.pdu_length, client.last_time),
+            (0, 0.0),
+            "{handshake:?}"
+        );
+        if let Some(closed) = server.await.unwrap() {
+            assert!(closed, "{handshake:?}: the half-open connection is closed");
+        }
+        assert_kind(
+            &client.read_db(1, 0, &mut [0; 1]).await,
+            kind::NOT_CONNECTED,
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
+async fn async_connect_not_established_within_the_connect_timeout_is_io() {
+    // Linux drops a SYN while the accept queue is full; backlog 0 holds one
+    // connection, so a second connect stays pending.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(0).expect("loopback sockets required");
+    let port = listener.local_addr().unwrap().port();
+    let _queued = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    let mut client = AsyncS7Client::new();
+    client.set_connection_port(port).unwrap();
+    client.set_timeout(200, 1000, 1000).unwrap();
+    let start = Instant::now();
+    let result = client.connect_s7300("127.0.0.1").await;
+    let elapsed = start.elapsed();
+    assert_kind(&result, kind::IO);
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("TCP connection not established within 200 ms"),
+        "{err}"
+    );
+    assert_eq!(
+        contexts(&err),
+        [format!("connect_s7300 ip=127.0.0.1 port={port}")]
+    );
+    assert!(
+        (Duration::from_millis(200)..Duration::from_secs(1)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(!client.connected);
+    assert_eq!((client.pdu_length, client.last_time), (0, 0.0));
+    drop(listener);
+}

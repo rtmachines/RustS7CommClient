@@ -518,3 +518,119 @@ async fn negotiation_matches_the_sync_implementation() {
     server.read_exact(&mut request).await.unwrap();
     assert_kind(&err, kind::PDU_NEGOTIATION_FAILED);
 }
+
+#[tokio::test]
+async fn invalid_transfers_send_nothing_like_sync() {
+    let db_byte = |start| Transfer {
+        area: S7_AREA_DB,
+        db_number: 1,
+        start,
+        wordlen: S7_WL_BYTE,
+    };
+    let cases = [
+        (Transfer::area(0x99, 1, 0, S7_WL_BYTE), 4),
+        (Transfer::area(S7_AREA_DB, 1, 0, 7), 4),
+        (Transfer::bit(S7_AREA_DB, 1, 0, 0).unwrap(), 0),
+        (db_byte(0x1f_ffff), 2),
+        (db_byte(0x20_0000), 1),
+    ];
+    for (transfer, len) in cases {
+        for write in [false, true] {
+            let case = format!("{transfer:?} len={len} write={write}");
+            let input = vec![0xa5; len];
+            let sync = sync_transfer(Plc::Ok, 240, transfer, write, input.clone());
+            let tokio = async_transfer(Plc::Ok, 240, transfer, write, input.clone()).await;
+            assert_kind(&sync.result, kind::INVALID_FUN_PARAMETER);
+            assert_kind(&tokio.result, kind::INVALID_FUN_PARAMETER);
+            assert!(tokio.requests.is_empty(), "{case}");
+            assert_eq!(tokio.buffer, input, "{case}");
+            assert_eq!(
+                (tokio.chunks, tokio.confirmed, tokio.reference),
+                (0, 0, 0x7ffe),
+                "{case}"
+            );
+            assert_eq!(
+                (sync.chunks, sync.confirmed, sync.reference),
+                (0, 0, 0x7ffe),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn write_error_is_io_with_the_cause() {
+    let (mut client, server) = duplex(64);
+    drop(server);
+    let result = send(&mut client, &[3, 0, 0, 4], SECOND).await;
+    assert_kind(&result, kind::IO);
+    let message = result.unwrap_err().to_string();
+    assert!(!message.contains("request not sent within"), "{message}");
+    assert!(
+        message.contains(&io::Error::from(io::ErrorKind::BrokenPipe).to_string()),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn negotiation_stops_at_a_failed_request() {
+    // A failed request is reported as it is, before any reply is awaited.
+    let (mut client, server) = duplex(64);
+    drop(server);
+    let result = negotiate(&mut client, 512, TIMEOUTS).await;
+    assert_kind(&result, kind::IO);
+
+    // The peer takes the request and closes without a reply.
+    let (mut client, mut server) = duplex(64);
+    let peer = tokio::spawn(async move {
+        let mut request = [0; 25];
+        server.read_exact(&mut request).await.unwrap();
+        request
+    });
+    let result = negotiate(&mut client, 512, TIMEOUTS).await;
+    assert_kind(&result, kind::CONNECTION_CLOSED);
+    assert_eq!(peer.await.unwrap(), protocol::negotiation_request(512).0);
+}
+
+#[tokio::test]
+async fn failed_request_counts_the_chunk_and_confirms_nothing() {
+    let limits = protocol::PduLimits::new(240).unwrap();
+    for write in [false, true] {
+        let (mut client, server) = duplex(64);
+        drop(server);
+        let mut buffer = vec![0x5a; 300];
+        let mut reference = 0x7ffe;
+        let mut progress = Progress::default();
+        let result = if write {
+            write_transfer(
+                &mut client,
+                &limits,
+                &mut reference,
+                Transfer::db(1, 0),
+                &buffer,
+                &mut progress,
+                TIMEOUTS,
+            )
+            .await
+        } else {
+            read_transfer(
+                &mut client,
+                &limits,
+                &mut reference,
+                Transfer::db(1, 0),
+                &mut buffer,
+                &mut progress,
+                TIMEOUTS,
+            )
+            .await
+        };
+        assert_kind(&result, kind::IO);
+        assert_eq!(
+            (progress.chunks, progress.confirmed),
+            (1, 0),
+            "write={write}"
+        );
+        assert_eq!(reference, 0x7fff, "write={write}");
+        assert_eq!(buffer, [0x5a; 300], "write={write}");
+    }
+}
