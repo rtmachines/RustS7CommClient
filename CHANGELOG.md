@@ -35,7 +35,7 @@
 - Transfers larger than 65535 bytes are no longer truncated. 0.1.2 transferred only the first 65535 bytes and returned `Ok`
 - A short or truncated read response is no longer reported as success. 0.1.2 could return `Ok` with a partly filled buffer
 - A response split across several TCP reads is assembled instead of being rejected
-- A negotiated PDU below 29 bytes is rejected with `kind::PDU_NEGOTIATION_FAILED` instead of underflowing the chunk size
+- A negotiated PDU below 29 bytes is rejected with `kind::PDU_NEGOTIATION_FAILED`. In 0.1.2 a PDU below 28 underflowed the chunk sizes (a debug build panicked), and a PDU of 28 gave writes a chunk size of 0, so a write repeated requests without progress
 - Bit access with an empty buffer returns `kind::INVALID_FUN_PARAMETER` before any I/O
 
 ### Migration 0.1 to 0.2
