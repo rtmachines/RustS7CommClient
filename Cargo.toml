@@ -22,6 +22,11 @@ path = "src/lib.rs"
 name = "sdk_client"
 path = "examples/sdk/client.rs"
 
+[[example]]
+name = "sdk_async_client"
+path = "examples/sdk/async_client.rs"
+required-features = ["tokio"]
+
 [features]
 ## Asynchronous client `AsyncS7Client` on tokio.
 tokio = ["dep:tokio"]

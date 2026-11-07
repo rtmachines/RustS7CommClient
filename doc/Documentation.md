@@ -78,6 +78,8 @@ while !exit_request{
 }
 ```
 
+With the `tokio` feature the same loop runs on an async runtime; see [Async client](#async-client-feature-tokio).
+
 ## Errors
 ---
 
@@ -648,3 +650,106 @@ automatically retried. After a read error only `[0, confirmed)` of the destinati
 buffer is a result. After a low-level
 communication error the client disconnects itself; reconnect before the next operation. `chunks` records attempted chunks, including the
 failing attempt; parameter validation failures leave it zero.
+
+# Async client (feature `tokio`)
+---
+
+`rust7::AsyncS7Client` (also `rust7::client::AsyncS7Client`) is the asynchronous counterpart of `S7Client` on
+[tokio](https://tokio.rs). It is available only with the `tokio` feature, which is off by default; without it the
+dependency tree of `rust7` does not change.
+
+```toml
+[dependencies]
+rust7 = { version = "0.2", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+```
+
+`rust7` itself enables only the tokio features `net`, `time` and `io-util`. Run the futures on a tokio 1 runtime
+with the I/O and time drivers enabled (`#[tokio::main]` or `Builder::enable_all()`). A host name (not an IP
+literal) is resolved on tokio's blocking pool, which needs tokio's `rt` feature; every application with a tokio 1
+runtime has it.
+
+Both clients share the protocol code: requests, response checks, PDU limits, telegram splitting and address
+validation are the same, and so are the error categories, the one context per method and the session rules
+described in [Errors](#errors). Everything in [API](#api) applies; only the calling convention differs:
+
+|Method|`S7Client`|`AsyncS7Client`|
+|---|---|---|
+|`new`, `set_connection_type`, `set_timeout`, `set_connection_port`|sync|sync|
+|`connect_s71200_1500`, `connect_s7300`, `connect_rack_slot`, `connect_tsap`|sync|`async` (`.await`)|
+|`read_area`, `write_area`, `read_db`, `write_db`, `read_bit`, `write_bit`|sync|`async` (`.await`)|
+|`disconnect`|sync|sync (closes the socket)|
+
+The public fields `connected`, `pdu_length`, `last_time`, `chunks` and `confirmed` have the same meaning. Methods
+take `&mut self`: one request is in flight at a time and the client has no internal locks. The returned futures
+are `Send`, so the client can live inside a spawned task.
+
+### Async workflow
+
+The workflow loop from [Workflow](#workflow) becomes:
+
+```rust,no_run
+use rust7::AsyncS7Client;
+use std::time::Duration;
+
+async fn run(ip_address: &str) {
+    let mut client = AsyncS7Client::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let mut buffer = [0u8; 64];
+    loop {
+        tick.tick().await;
+        if !client.connected {
+            if let Err(e) = client.connect_s71200_1500(ip_address).await {
+                eprintln!("{e:#}");
+                continue;
+            }
+        }
+        // Transport and framing errors disconnect the client; the next tick reconnects.
+        if let Err(e) = client.read_db(100, 0, &mut buffer).await {
+            eprintln!("{e:#}");
+        }
+    }
+}
+```
+
+### Cancellation
+
+The I/O methods are not cancel-safe in the tokio sense: an abandoned call cannot be resumed.
+
+- A future that was never polled has no effect.
+- Dropping a future after it was polled and before it completed (for example through `tokio::select!` or
+  `tokio::time::timeout`) disconnects the client: `connected` becomes `false`, `pdu_length` is 0, the socket is
+  closed and the next read or write returns `kind::NOT_CONNECTED`. `last_time` is 0.
+- `chunks` and `confirmed` keep the values reached, with the meaning they have after an error: for a write, bytes
+  `[0, confirmed)` were acknowledged, the chunk starting at `confirmed` may or may not have been written, and later
+  bytes were not sent. No write is retried.
+- A cancelled `connect_*` leaves the client disconnected, because the previous session is closed first and the new
+  one becomes available only after both handshakes.
+
+```rust,no_run
+use rust7::AsyncS7Client;
+use std::time::Duration;
+
+async fn bounded_read(client: &mut AsyncS7Client) {
+    let mut buffer = [0u8; 16];
+    match tokio::time::timeout(Duration::from_millis(250), client.read_db(100, 0, &mut buffer)).await {
+        Ok(Ok(())) => println!("read {} bytes", client.confirmed),
+        Ok(Err(e)) => eprintln!("read failed: {e:#}"),
+        Err(_) => assert!(!client.connected), // abandoned: reconnect before the next call
+    }
+}
+```
+
+### Timeouts
+
+`set_timeout(co_timeout_ms, rd_timeout_ms, wr_timeout_ms)` takes the same values as for `S7Client`:
+
+- `rd_timeout_ms` bounds one complete response frame and reports `no complete response frame within <N> ms`
+  (`kind::IO`), as in `S7Client`. A new value applies to the next response.
+- `wr_timeout_ms` bounds sending and flushing a whole request instead of each socket send, and reports
+  `request not sent within <N> ms` (`kind::IO`). As in `S7Client`, the value in force at connect applies to the whole
+  session; a new value takes effect at the next connect.
+- `co_timeout_ms` bounds the TCP connect and reports `TCP connection not established within <N> ms` (`kind::IO`).
+  As in `S7Client`, name resolution is not bounded by it, and only the first resolved address is tried.
+
+A complete program is in [examples/sdk/async_client.rs](../examples/sdk/async_client.rs).
