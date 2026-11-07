@@ -332,3 +332,59 @@ fn invalid_write_area_keeps_active_session() {
         assert!(client.limits.is_some());
     }
 }
+
+#[test]
+fn public_arguments_map_to_transfer() {
+    use protocol::{bit_payload, bit_value, Transfer};
+
+    for area in [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB] {
+        assert_eq!(
+            Transfer::area(area, 9, 0x1234, S7_WL_BYTE),
+            Transfer {
+                area,
+                db_number: 9,
+                start: 0x1234,
+                wordlen: S7_WL_BYTE,
+            }
+        );
+    }
+    assert_eq!(
+        Transfer::db(7, 3),
+        Transfer {
+            area: S7_AREA_DB,
+            db_number: 7,
+            start: 3,
+            wordlen: S7_WL_BYTE,
+        }
+    );
+    let edge = Transfer::db(u16::MAX, u16::MAX);
+    assert_eq!(edge.db_number, 65535);
+    assert_eq!(edge.start, 65535);
+
+    assert_eq!(
+        Transfer::bit(S7_AREA_MK, 5, 10, 0).unwrap(),
+        Transfer {
+            area: S7_AREA_MK,
+            db_number: 5,
+            start: 80,
+            wordlen: S7_WL_BIT,
+        }
+    );
+    let bit = Transfer::bit(S7_AREA_DB, 12, 10, 3).unwrap();
+    assert_eq!(bit.start, 83);
+    assert_eq!(bit.db_number, 12);
+    assert_eq!(
+        Transfer::bit(S7_AREA_DB, 1, 65535, 7).unwrap().start,
+        524287
+    );
+    assert_kind(
+        &Transfer::bit(S7_AREA_DB, 1, 0, 8),
+        kind::INVALID_FUN_PARAMETER,
+    );
+
+    assert_eq!(bit_payload(false), [0]);
+    assert_eq!(bit_payload(true), [1]);
+    assert!(!bit_value(0));
+    assert!(bit_value(1));
+    assert!(bit_value(5));
+}

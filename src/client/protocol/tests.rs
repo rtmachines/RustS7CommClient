@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::{S7_AREA_DB, S7_AREA_MK, S7_AREA_PA, S7_WL_BYTE};
 use crate::error::{assert_kind, kind};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
@@ -1285,12 +1286,8 @@ fn ack_without_data_leaves_payload_checks_to_caller() {
 #[test]
 fn requests_match_reference_bytes() {
     // TPKT(4) | COTP DT(3) | Job header(10) | parameters | data header
-    let read_bytes = Transfer {
-        area: 0x84,
-        db_number: 0x1234,
-        start: 0x0102,
-        wordlen: 2,
-    };
+    let read_bytes = Transfer::area(S7_AREA_DB, 0x1234, 0x0102, S7_WL_BYTE);
+    let write_bytes = Transfer::db(0x1234, 0x0102);
     assert_eq!(
         request(&read_bytes, 0, 3, 0x0a0b, None),
         vec![
@@ -1300,12 +1297,7 @@ fn requests_match_reference_bytes() {
             4, 1, 0x12, 0x0a, 0x10, 2, 0, 3, 0x12, 0x34, 0x84, 0, 0x08, 0x10,
         ]
     );
-    let read_bit = Transfer {
-        area: 0x83,
-        db_number: 0,
-        start: 83,
-        wordlen: 1,
-    };
+    let read_bit = Transfer::bit(S7_AREA_MK, 0, 10, 3).unwrap();
     assert_eq!(
         request(&read_bit, 0, 1, 0x0102, None),
         vec![
@@ -1314,19 +1306,14 @@ fn requests_match_reference_bytes() {
         ]
     );
     assert_eq!(
-        request(&read_bytes, 0, 3, 0x0a0c, Some(&[0xde, 0xad, 0xbe])),
+        request(&write_bytes, 0, 3, 0x0a0c, Some(&[0xde, 0xad, 0xbe])),
         vec![
             3, 0, 0, 0x26, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 0x0a, 0x0c, 0, 0x0e, 0, 7, //
             5, 1, 0x12, 0x0a, 0x10, 2, 0, 3, 0x12, 0x34, 0x84, 0, 0x08, 0x10, //
             0, 4, 0, 0x18, 0xde, 0xad, 0xbe,
         ]
     );
-    let write_bit = Transfer {
-        area: 0x82,
-        db_number: 0,
-        start: 83,
-        wordlen: 1,
-    };
+    let write_bit = Transfer::bit(S7_AREA_PA, 0, 10, 3).unwrap();
     assert_eq!(
         request(&write_bit, 0, 1, 0x0a0d, Some(&[0])),
         vec![
