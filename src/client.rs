@@ -11,6 +11,9 @@ use std::time::Instant;
 
 #[cfg(feature = "tokio")]
 mod async_client;
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing;
 mod protocol;
 mod shared;
 
