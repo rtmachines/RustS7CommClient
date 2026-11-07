@@ -346,6 +346,30 @@ async fn async_connect_abandoned_during_handshake_leaves_client_disconnected() {
 
 #[tokio::test]
 #[ignore = "requires permission to open loopback sockets"]
+async fn async_failed_connect_closes_the_previous_session() {
+    let (mut client, server) = connected(240, 1000, vec![]).await;
+    let refused = super::closed_port();
+    client.set_connection_port(refused).unwrap();
+    let result = client.connect_s7300("127.0.0.1").await;
+    assert_kind(&result, kind::IO);
+    assert_eq!(
+        contexts(&result.unwrap_err()),
+        [format!("connect_s7300 ip=127.0.0.1 port={refused}")]
+    );
+    assert!(!client.connected);
+    assert_eq!(client.pdu_length, 0);
+    // The previous session is closed first: the mock sees end of stream.
+    let served = server.await.unwrap();
+    assert!(served.closed_by_client);
+    assert!(served.requests.is_empty());
+    assert_kind(
+        &client.read_db(1, 0, &mut [0; 1]).await,
+        kind::NOT_CONNECTED,
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
 async fn async_refused_connection_is_io_with_context() {
     let port = super::closed_port();
     let mut client = AsyncS7Client::new();

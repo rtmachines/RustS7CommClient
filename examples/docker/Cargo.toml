@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rust7 = "0.2"
+# Published release from the registry; raise to 0.2 once 0.2.0 is published.
+rust7 = "0.1.2"
 
 [[bin]]
 name = "docker"

@@ -84,7 +84,8 @@ fn read_byte_s7_second_db(s7_client: &mut S7Client, db_number: u16) {
 
 fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
     // Read a bit
-    println!("\nAttempt to read DB1.DBX72.6"); // 01001000, will be true since it's 1 (Counting <- (7,6,5,4,3,2,1,0))
+    // Byte 0 is 'H' = 72 = 01001000 (Counting <- (7,6,5,4,3,2,1,0))
+    println!("\nAttempt to read DB1.DBX0.6"); // will be true since it's 1
     match s7_client.read_bit(client::S7_AREA_DB, db_number, 0, 6) {
         Ok(value) => {
             println!("Success!");
@@ -95,7 +96,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
         Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
-    println!("\n[SECOND TIME] Attempt to read DB1.DBX72.7"); // 01001000, will be false since it's 0 (Counting <- (7,6,5,4,3,2,1,0))
+    println!("\n[SECOND TIME] Attempt to read DB1.DBX0.7"); // will be false since it's 0
     match s7_client.read_bit(client::S7_AREA_DB, db_number, 0, 7) {
         Ok(value) => {
             println!("Success!");
@@ -106,7 +107,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
         Err(e) => eprintln!("Read failed: {e:#}"),
     }
 
-    println!("\n[THIRD TIME] Attempt to read DB1.DBX72.8"); // 01001000, will be throwing an error since it's out of index (Counting <- (7,6,5,4,3,2,1,0))
+    println!("\n[THIRD TIME] Attempt to read DB1.DBX0.8"); // will be throwing an error since bit 8 is out of index
     match s7_client.read_bit(client::S7_AREA_DB, db_number, 0, 8) {
         Ok(value) => {
             println!("Success!");
@@ -121,7 +122,7 @@ fn read_bit_s7(s7_client: &mut S7Client, db_number: u16) {
 fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
     // Writes 16 byte to DB2, INTENTIONALLY to demonstrate for new people to learn to filter out NULL Values
     println!();
-    println!("Attempt to write 16 byte to DB2");
+    println!("Attempt to write 8 byte to DB2");
     let text: &str = "Bye, S7!";
     let ascii_bytes = text.as_bytes(); // Convert string to ASCII bytes
     for byte in ascii_bytes {
@@ -141,7 +142,7 @@ fn write_byte_s7(s7_client: &mut S7Client, db_number: u16) {
 fn write_bit_s7(s7_client: &mut S7Client, db_number: u16) {
     // Write a bit
     println!();
-    println!("Attempt to write 'false' into DB1.DBX72.7"); // 01001000, will be true since because index exists (Counting <- (7,6,5,4,3,2,1,0))
+    println!("Attempt to write 'true' into DB1.DBX16.0"); // succeeds since the index exists
     match s7_client.write_bit(client::S7_AREA_DB, db_number, 16, 0, true) {
         Ok(_) => {
             println!("Success!");

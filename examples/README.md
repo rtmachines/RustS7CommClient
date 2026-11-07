@@ -7,6 +7,6 @@ When working with an PLC SDK, it may be challenging to work with the SDK if you 
 
 The examples report errors with `eprintln!("...: {e:#}")`. The plain format `{e}` prints category, message, context and causes on one line; the alternate format `{e:#}` prints them on separate lines.
 
-The Docker example (`examples/docker`) is a separate package that depends on the published `rust7 = "0.2"` from the registry. Until 0.2 is published, building it does not test the current checkout of this library.
+The Docker example (`examples/docker`) is a separate package that depends on the published `rust7 = "0.1.2"` from the registry, so building it does not test the current checkout of this library, and its errors are the 0.1 `S7Error`, without the categories and contexts above. Its dependency moves to 0.2 once 0.2.0 is published.
 
 Build the SDK example with `cargo build --example sdk_client`, and its async counterpart on tokio with `cargo build --example sdk_async_client --features tokio`. Run them only against a device you have explicitly chosen; they connect to a real PLC.

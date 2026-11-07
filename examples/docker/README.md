@@ -36,7 +36,7 @@ curl -X 'POST' \
 task run
 ```
 
-Note: the Docker example builds against `rust7 = "0.2"` from the registry, not the local checkout. Until 0.2 is published it does not test the current checkout of the library.
+Note: the Docker example builds against the published `rust7 = "0.1.2"` from the registry, not the local checkout, so it does not test the current checkout of the library. Its dependency moves to 0.2 once 0.2.0 is published.
 
 1\. Installing Docker
 =====================
