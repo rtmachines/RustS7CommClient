@@ -1,0 +1,125 @@
+# Runs the checks listed in AGENTS.md. Keep the two in step.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - name: cargo fmt (fuzz)
+        working-directory: fuzz
+        run: cargo fmt -- --check
+
+  # Library, tests and examples on stable, without and with the tokio feature.
+  check:
+    name: check (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            features: ""
+          - name: tokio
+            features: --features tokio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: clippy
+        run: cargo clippy --locked --all-targets ${{ matrix.features }} -- -D warnings
+      - name: test
+        run: cargo test --locked ${{ matrix.features }}
+      - name: tcp_smoke (loopback)
+        run: cargo test --locked --test tcp_smoke ${{ matrix.features }} -- --ignored
+      - name: library loopback test
+        if: matrix.name == 'tokio'
+        run: cargo test --locked --lib --features tokio -- --ignored
+      - name: doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps ${{ matrix.features }}
+      - name: tokio stays out of the default tree
+        if: matrix.name == 'default'
+        run: |
+          if cargo tree --locked -e normal | grep tokio; then
+            echo "::error::tokio is a normal dependency without the tokio feature"
+            exit 1
+          fi
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
+      - run: cargo check --locked --all-targets --features tokio
+
+  # Builds the fuzz targets, lints them and runs each briefly. Longer campaigns are run by hand.
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: clippy (library with cfg(fuzzing))
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo clippy --locked --lib --target-dir target/fuzzcheck -- -D warnings
+      - name: clippy (fuzz targets)
+        working-directory: fuzz
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo clippy --locked -- -D warnings
+      - name: fuzz
+        working-directory: fuzz
+        # The prebuilt cargo-fuzz is a musl binary and would default to its own target.
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          for target in $(cargo fuzz list); do
+            cargo fuzz run --target "$host" --sanitizer none "$target" -- -max_total_time=30 -max_len=4096
+          done
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

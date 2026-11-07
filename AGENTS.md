@@ -47,6 +47,10 @@ transportu uruchom również ignorowane testy TCP; wymagają dostępu do lokalny
 gniazd, więc w sandboksie bez sieci mogą nie przejść z przyczyn środowiskowych.
 Po zmianach dokumentacji API sprawdź także generowanie dokumentacji.
 
+CI (.github/workflows/ci.yml) uruchamia komendy z tabeli w obu wariantach feature'a,
+`cargo check` na MSRV oraz krótki fuzzing każdego targetu; ostrzeżenia kompilatora i rustdoc
+są tam błędami. Zmieniając komendę w tabeli, zmień ją również w workflow.
+
 ## Nawigacja
 
 Narzędzia code-review-graph i reviewdog opisują instrukcje globalne użytkownika;
