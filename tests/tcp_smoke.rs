@@ -191,8 +191,21 @@ fn serve(mut stream: TcpStream, scenario: Scenario) -> io::Result<()> {
         };
         reference = reference.wrapping_add(1);
         assert_eq!(&request[11..13], &reference.to_be_bytes());
-        assert!(request.len() - 4 <= tpdu_limit);
         let count = usize::from(u16::from_be_bytes([request[23], request[24]]));
+        assert_eq!(&request[4..11], &[2, 0xf0, 0x80, 0x32, 1, 0, 0]);
+        assert_eq!(&request[13..15], &[0, 14]);
+        assert_eq!(&request[18..22], &[1, 0x12, 0x0a, 0x10]);
+        if request[17] == 4 {
+            assert_eq!(&request[15..17], &[0, 0]);
+        } else {
+            let bit = request[22] == 1;
+            assert_eq!(&request[15..17], &((count + 4) as u16).to_be_bytes());
+            assert_eq!(request[31], 0);
+            assert_eq!(request[32], if bit { 3 } else { 4 });
+            let bits = if bit { 1 } else { count * 8 } as u16;
+            assert_eq!(&request[33..35], &bits.to_be_bytes());
+        }
+        assert!(request.len() - 4 <= tpdu_limit);
         if request[17] == 4 {
             assert!(3 + 18 + count <= tpdu_limit);
         }

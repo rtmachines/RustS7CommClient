@@ -1279,6 +1279,64 @@ fn ack_without_data_leaves_payload_checks_to_caller() {
     assert_eq!(ack_data(&ack(1, 5, &[]), 1, 5).unwrap(), &[] as &[u8]);
 }
 
+// Reference frames follow the S7comm layout (Snap7, Wireshark s7comm
+// dissector). Without a PLC capture they are a reference, not proof of
+// firmware conformance.
+#[test]
+fn requests_match_reference_bytes() {
+    // TPKT(4) | COTP DT(3) | Job header(10) | parameters | data header
+    let read_bytes = Transfer {
+        area: 0x84,
+        db_number: 0x1234,
+        start: 0x0102,
+        wordlen: 2,
+    };
+    assert_eq!(
+        request(&read_bytes, 0, 3, 0x0a0b, None),
+        vec![
+            3, 0, 0, 0x1f, // TPKT: version, reserved, length
+            2, 0xf0, 0x80, // COTP DT
+            0x32, 1, 0, 0, 0x0a, 0x0b, 0, 0x0e, 0, 0, // S7 header: Job, ref, lens
+            4, 1, 0x12, 0x0a, 0x10, 2, 0, 3, 0x12, 0x34, 0x84, 0, 0x08, 0x10,
+        ]
+    );
+    let read_bit = Transfer {
+        area: 0x83,
+        db_number: 0,
+        start: 83,
+        wordlen: 1,
+    };
+    assert_eq!(
+        request(&read_bit, 0, 1, 0x0102, None),
+        vec![
+            3, 0, 0, 0x1f, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 0x01, 0x02, 0, 0x0e, 0, 0, //
+            4, 1, 0x12, 0x0a, 0x10, 1, 0, 1, 0, 0, 0x83, 0, 0, 0x53,
+        ]
+    );
+    assert_eq!(
+        request(&read_bytes, 0, 3, 0x0a0c, Some(&[0xde, 0xad, 0xbe])),
+        vec![
+            3, 0, 0, 0x26, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 0x0a, 0x0c, 0, 0x0e, 0, 7, //
+            5, 1, 0x12, 0x0a, 0x10, 2, 0, 3, 0x12, 0x34, 0x84, 0, 0x08, 0x10, //
+            0, 4, 0, 0x18, 0xde, 0xad, 0xbe,
+        ]
+    );
+    let write_bit = Transfer {
+        area: 0x82,
+        db_number: 0,
+        start: 83,
+        wordlen: 1,
+    };
+    assert_eq!(
+        request(&write_bit, 0, 1, 0x0a0d, Some(&[0])),
+        vec![
+            3, 0, 0, 0x24, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 0x0a, 0x0d, 0, 0x0e, 0, 5, //
+            5, 1, 0x12, 0x0a, 0x10, 1, 0, 1, 0, 0, 0x82, 0, 0, 0x53, //
+            0, 3, 0, 1, 0,
+        ]
+    );
+}
+
 mod properties {
     use super::*;
     use proptest::collection::vec;
