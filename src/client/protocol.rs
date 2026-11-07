@@ -39,15 +39,31 @@ pub(super) fn negotiate<T: FrameRead + Write>(
     tpdu_limit: u16,
     timeout: Duration,
 ) -> Result<PduLimits> {
+    let (request, requested_pdu) = negotiation_request(tpdu_limit);
+    io.write_all(&request).map_err(error::io)?;
+    let frame = read_tpkt(io, NEGOTIATION_FRAME_MAX, timeout)?;
+    accept_negotiation(&frame, requested_pdu)
+}
+
+/// Largest Setup Communication reply accepted while negotiating.
+pub(super) const NEGOTIATION_FRAME_MAX: usize = 487;
+
+/// Largest Connection Confirm accepted while connecting.
+pub(super) const CONFIRM_FRAME_MAX: usize = 1028;
+
+/// Setup Communication request and the PDU size it offers.
+pub(super) fn negotiation_request(tpdu_limit: u16) -> ([u8; 25], u16) {
     // CC validation guarantees at least 128 bytes, including the COTP header.
     let requested_pdu = 480.min(tpdu_limit - 3);
     let mut request = [
         3, 0, 0, 25, 2, 0xf0, 0x80, 0x32, 1, 0, 0, 4, 0, 0, 8, 0, 0, 0xf0, 0, 0, 1, 0, 1, 1, 0xe0,
     ];
     request[23..25].copy_from_slice(&requested_pdu.to_be_bytes());
-    io.write_all(&request).map_err(error::io)?;
-    let frame = read_tpkt(io, 487, timeout)?;
-    let pdu = data_payload(&frame).map_err(error::pdu_negotiation_failed_by)?;
+    (request, requested_pdu)
+}
+
+pub(super) fn accept_negotiation(frame: &[u8], requested_pdu: u16) -> Result<PduLimits> {
+    let pdu = data_payload(frame).map_err(error::pdu_negotiation_failed_by)?;
     // One outstanding job in each direction was requested; all these fields
     // belong to the Setup Communication ACK_DATA, not to the negotiated size.
     if pdu.len() != 20 || pdu[..18] != [0x32, 3, 0, 0, 4, 0, 0, 8, 0, 0, 0, 0, 0xf0, 0, 0, 1, 0, 1]
@@ -61,6 +77,38 @@ pub(super) fn negotiate<T: FrameRead + Write>(
     PduLimits::new(pdu_length)
 }
 
+/// ISO-on-TCP Connection Request for the given TSAPs.
+pub(super) fn connection_request(local_tsap: u16, remote_tsap: u16) -> [u8; 22] {
+    let [local_hi, local_lo] = local_tsap.to_be_bytes();
+    let [remote_hi, remote_lo] = remote_tsap.to_be_bytes();
+    [
+        // TPKT (RFC1006 Header)
+        3,  // RFC 1006 ID (3)
+        0,  // Reserved, always 0
+        0,  // High part of packet length (entire frame, payload and TPDU included)
+        22, // Low part of packet length (entire frame, payload and TPDU included)
+        // COTP (ISO 8073 Header)
+        0x11,      // COTP header length (LI = 17)
+        0xe0,      // CR - Connection Request ID
+        0x00,      // Dst Reference HI
+        0x00,      // Dst Reference LO
+        0x00,      // Src Reference HI
+        0x01,      // Src Reference LO
+        0x00,      // Class + Options Flags
+        0xC0,      // TPDU size parameter
+        0x01,      // Parameter length
+        0x0A,      // TPDU size exponent (2^10 = 1024)
+        0xC1,      // Src TSAP Identifier
+        0x02,      // Src TSAP Length (2 bytes)
+        local_hi,  // Loc TSAP HI
+        local_lo,  // Loc TSAP LO
+        0xC2,      // Rem TSAP Identifier
+        0x02,      // Rem TSAP Length (2 bytes)
+        remote_hi, // Rem TSAP HI
+        remote_lo, // Rem TSAP LO
+    ]
+}
+
 pub(super) fn read_tpkt<R: FrameRead>(
     reader: &mut R,
     max_total: usize,
@@ -71,6 +119,15 @@ pub(super) fn read_tpkt<R: FrameRead>(
     let deadline = Instant::now().checked_add(timeout);
     let mut header = [0; 4];
     read_full(reader, &mut header, deadline, timeout)?;
+    let len = tpkt_length(&header, max_total)?;
+    let mut frame = vec![0; len];
+    frame[..4].copy_from_slice(&header);
+    read_full(reader, &mut frame[4..], deadline, timeout)?;
+    Ok(frame)
+}
+
+/// Total frame length announced by a TPKT header.
+pub(super) fn tpkt_length(header: &[u8; 4], max_total: usize) -> Result<usize> {
     if header[0] != 3 || header[1] != 0 {
         return Err(error::iso_invalid_header());
     }
@@ -78,10 +135,7 @@ pub(super) fn read_tpkt<R: FrameRead>(
     if len < 4 || len > max_total {
         return Err(error::iso_invalid_telegram());
     }
-    let mut frame = vec![0; len];
-    frame[..4].copy_from_slice(&header);
-    read_full(reader, &mut frame[4..], deadline, timeout)?;
-    Ok(frame)
+    Ok(len)
 }
 
 fn read_full<R: FrameRead>(
@@ -118,13 +172,10 @@ fn read_full<R: FrameRead>(
     Ok(())
 }
 
-fn timed_out(timeout: Duration) -> AnyError {
-    error::io(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!(
-            "no complete response frame within {} ms",
-            timeout.as_millis()
-        ),
+pub(super) fn timed_out(timeout: Duration) -> AnyError {
+    error::timed_out(format!(
+        "no complete response frame within {} ms",
+        timeout.as_millis()
     ))
 }
 
@@ -400,7 +451,7 @@ fn request(
     req
 }
 
-fn valid_area(area: u8) -> Result<()> {
+pub(super) fn valid_area(area: u8) -> Result<()> {
     if ![0x81, 0x82, 0x83, 0x84].contains(&area) {
         return Err(error::invalid_fun_parameter());
     }
@@ -414,6 +465,131 @@ pub(super) struct Progress {
     pub(super) confirmed: usize,
 }
 
+/// One request of a transfer and what its response must match.
+pub(super) struct Chunk {
+    pub(super) request: Vec<u8>,
+    reference: u16,
+    count: usize,
+}
+
+/// Splits a validated transfer into requests and checks their responses,
+/// without doing I/O.
+pub(super) struct TransferPlan {
+    transfer: Transfer,
+    len: usize,
+    offset: usize,
+    payload_limit: usize,
+    frame_limit: usize,
+    bit: [u8; 1],
+}
+
+impl TransferPlan {
+    pub(super) fn read(limits: &PduLimits, transfer: Transfer, len: usize) -> Result<Self> {
+        Self::new(limits, transfer, len, limits.read_payload, 0)
+    }
+
+    pub(super) fn write(limits: &PduLimits, transfer: Transfer, buffer: &[u8]) -> Result<Self> {
+        let bit = buffer.first().is_some_and(|&b| b != 0);
+        Self::new(
+            limits,
+            transfer,
+            buffer.len(),
+            limits.write_payload,
+            u8::from(bit),
+        )
+    }
+
+    fn new(
+        limits: &PduLimits,
+        transfer: Transfer,
+        len: usize,
+        payload_limit: usize,
+        bit: u8,
+    ) -> Result<Self> {
+        valid_area(transfer.area)?;
+        let len = validate_transfer(transfer.start, transfer.wordlen, len)?;
+        Ok(Self {
+            transfer,
+            len,
+            offset: 0,
+            payload_limit,
+            frame_limit: usize::from(limits.pdu_length) + 7,
+            bit: [bit],
+        })
+    }
+
+    /// Largest response frame accepted for a chunk.
+    pub(super) fn frame_limit(&self) -> usize {
+        self.frame_limit
+    }
+
+    fn next_count(&self) -> Option<usize> {
+        (self.offset < self.len).then(|| (self.len - self.offset).min(self.payload_limit))
+    }
+
+    pub(super) fn next_read(&self, reference: &mut u16) -> Option<Chunk> {
+        let count = self.next_count()?;
+        let reference = next_reference(reference);
+        let request = request(&self.transfer, self.offset, count, reference, None);
+        Some(Chunk {
+            request,
+            reference,
+            count,
+        })
+    }
+
+    pub(super) fn next_write(&self, reference: &mut u16, buffer: &[u8]) -> Option<Chunk> {
+        let count = self.next_count()?;
+        let reference = next_reference(reference);
+        // validate_transfer guarantees a nonempty buffer for bit access.
+        let payload = if self.transfer.wordlen == 1 {
+            &self.bit[..]
+        } else {
+            &buffer[self.offset..self.offset + count]
+        };
+        let request = request(&self.transfer, self.offset, count, reference, Some(payload));
+        Some(Chunk {
+            request,
+            reference,
+            count,
+        })
+    }
+
+    pub(super) fn accept_read(
+        &mut self,
+        chunk: &Chunk,
+        frame: &[u8],
+        buffer: &mut [u8],
+        progress: &mut Progress,
+    ) -> Result<()> {
+        let data = validate_read_response(
+            data_payload(frame)?,
+            chunk.reference,
+            self.transfer.wordlen,
+            chunk.count,
+        )?;
+        buffer[self.offset..self.offset + chunk.count].copy_from_slice(data);
+        self.advance(chunk, progress);
+        Ok(())
+    }
+
+    pub(super) fn accept_write(
+        &mut self,
+        chunk: &Chunk,
+        frame: &[u8],
+        progress: &mut Progress,
+    ) -> Result<()> {
+        validate_write_response(data_payload(frame)?, chunk.reference)?;
+        self.advance(chunk, progress);
+        Ok(())
+    }
+
+    fn advance(&mut self, chunk: &Chunk, progress: &mut Progress) {
+        self.offset += chunk.count;
+        progress.confirmed = self.offset;
+    }
+}
+
 pub(super) fn read_transfer<T: FrameRead + Write>(
     io: &mut T,
     limits: &PduLimits,
@@ -423,21 +599,12 @@ pub(super) fn read_transfer<T: FrameRead + Write>(
     progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
-    valid_area(transfer.area)?;
-    let len = validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
-    let mut offset = 0;
-    while offset < len {
-        let count = (len - offset).min(limits.read_payload);
-        let reference = next_reference(reference);
-        let req = request(&transfer, offset, count, reference, None);
+    let mut plan = TransferPlan::read(limits, transfer, buffer.len())?;
+    while let Some(chunk) = plan.next_read(reference) {
         progress.chunks += 1;
-        io.write_all(&req).map_err(error::io)?;
-        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
-        let data =
-            validate_read_response(data_payload(&frame)?, reference, transfer.wordlen, count)?;
-        buffer[offset..offset + count].copy_from_slice(data);
-        offset += count;
-        progress.confirmed = offset;
+        io.write_all(&chunk.request).map_err(error::io)?;
+        let frame = read_tpkt(io, plan.frame_limit(), timeout)?;
+        plan.accept_read(&chunk, &frame, buffer, progress)?;
     }
     Ok(())
 }
@@ -451,26 +618,12 @@ pub(super) fn write_transfer<T: FrameRead + Write>(
     progress: &mut Progress,
     timeout: Duration,
 ) -> Result<()> {
-    valid_area(transfer.area)?;
-    let len = validate_transfer(transfer.start, transfer.wordlen, buffer.len())?;
-    // validate_transfer guarantees a nonempty buffer for bit access.
-    let bit = [u8::from(transfer.wordlen == 1 && buffer[0] != 0)];
-    let mut offset = 0;
-    while offset < len {
-        let count = (len - offset).min(limits.write_payload);
-        let reference = next_reference(reference);
-        let payload = if transfer.wordlen == 1 {
-            &bit[..]
-        } else {
-            &buffer[offset..offset + count]
-        };
-        let req = request(&transfer, offset, count, reference, Some(payload));
+    let mut plan = TransferPlan::write(limits, transfer, buffer)?;
+    while let Some(chunk) = plan.next_write(reference, buffer) {
         progress.chunks += 1;
-        io.write_all(&req).map_err(error::io)?;
-        let frame = read_tpkt(io, usize::from(limits.pdu_length) + 7, timeout)?;
-        validate_write_response(data_payload(&frame)?, reference)?;
-        offset += count;
-        progress.confirmed = offset;
+        io.write_all(&chunk.request).map_err(error::io)?;
+        let frame = read_tpkt(io, plan.frame_limit(), timeout)?;
+        plan.accept_write(&chunk, &frame, progress)?;
     }
     Ok(())
 }

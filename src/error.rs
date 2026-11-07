@@ -91,6 +91,11 @@ pub(crate) fn io(e: std::io::Error) -> AnyError {
     AnyError::new(&e).with_type(Some(kind::IO))
 }
 
+/// A deadline expired; `kind::IO` like any other transport failure.
+pub(crate) fn timed_out(msg: String) -> AnyError {
+    io(std::io::Error::new(std::io::ErrorKind::TimedOut, msg))
+}
+
 pub(crate) fn not_connected() -> AnyError {
     domain(kind::NOT_CONNECTED, "Not connected")
 }

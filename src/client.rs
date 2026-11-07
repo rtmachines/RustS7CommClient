@@ -10,6 +10,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod protocol;
+mod shared;
+
+use shared::ctx;
 
 #[cfg(test)]
 mod tests;
@@ -28,24 +31,6 @@ pub const S7_AREA_DB: u8 = 0x84; // Data Block
 // Wordlen
 pub const S7_WL_BIT: u8 = 0x01;
 pub const S7_WL_BYTE: u8 = 0x02;
-
-// ISO connection request constants.
-const ISO_CR_LEN: usize = 22;
-const ISO_CONN_REQ: u8 = 0xe0;
-const ISO_ID: u8 = 3;
-
-// Macros
-macro_rules! hi_part {
-    ($x:expr) => {
-        (($x >> 8) & 0xFF) as u8
-    };
-}
-
-macro_rules! lo_part {
-    ($x:expr) => {
-        ($x & 0xFF) as u8
-    };
-}
 
 pub struct S7Client {
     stream: Option<TcpStream>,
@@ -106,11 +91,7 @@ impl S7Client {
     /// ### Check S7 Area validity
     ///
     fn check_area(&mut self, area: u8) -> Result<()> {
-        const AREAS: [u8; 4] = [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB];
-        if !AREAS.contains(&area) {
-            return Err(error::invalid_fun_parameter());
-        }
-        Ok(())
+        shared::check_area(area)
     }
 
     /// ### Changes the S7 connection type to the PLC
@@ -143,10 +124,8 @@ impl S7Client {
     /// 2. This method is not useful if you use `connect_tsap()` because the connection_type is already contained in the REMOTE_TSAP record.
     ///    
     pub fn set_connection_type(&mut self, connection_type: u16) -> Result<()> {
-        if !(CT_PG..=CT_S7).contains(&connection_type) {
-            return Err(error::invalid_fun_parameter()
-                .add_context(|| format!("set_connection_type connection_type={connection_type}")));
-        }
+        shared::check_connection_type(connection_type)
+            .add_context(|| ctx::set_connection_type(connection_type))?;
 
         self.conn_type = connection_type;
 
@@ -177,13 +156,8 @@ impl S7Client {
         rd_timeout_ms: u64,
         wr_timeout_ms: u64,
     ) -> Result<()> {
-        if co_timeout_ms == 0 || rd_timeout_ms == 0 || wr_timeout_ms == 0 {
-            return Err(error::invalid_fun_parameter().add_context(|| {
-                format!(
-                    "set_timeout co_timeout_ms={co_timeout_ms} rd_timeout_ms={rd_timeout_ms} wr_timeout_ms={wr_timeout_ms}"
-                )
-            }));
-        }
+        shared::check_timeouts(co_timeout_ms, rd_timeout_ms, wr_timeout_ms)
+            .add_context(|| ctx::set_timeout(co_timeout_ms, rd_timeout_ms, wr_timeout_ms))?;
 
         self.co_timeout_ms = co_timeout_ms;
         self.rd_timeout_ms = rd_timeout_ms;
@@ -210,10 +184,7 @@ impl S7Client {
     /// 2. The client must not be connected (that is, call this method before connecting).
     ///
     pub fn set_connection_port(&mut self, port: u16) -> Result<()> {
-        if port == 0 {
-            return Err(error::invalid_fun_parameter()
-                .add_context(|| format!("set_connection_port port={port}")));
-        }
+        shared::check_port(port).add_context(|| ctx::set_connection_port(port))?;
 
         self.port = port;
 
@@ -231,7 +202,7 @@ impl S7Client {
     ///
     pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<()> {
         self.connect_rack_slot_impl(ip, 0, 0)
-            .add_context(|| format!("connect_s71200_1500 ip={ip} port={}", self.port))
+            .add_context(|| ctx::connect_s71200_1500(ip, self.port))
     }
 
     /// ### Connects to the S7300 family
@@ -245,7 +216,7 @@ impl S7Client {
     ///
     pub fn connect_s7300(&mut self, ip: &str) -> Result<()> {
         self.connect_rack_slot_impl(ip, 0, 2)
-            .add_context(|| format!("connect_s7300 ip={ip} port={}", self.port))
+            .add_context(|| ctx::connect_s7300(ip, self.port))
     }
 
     /// ### Connects to a Siemens PLC/Drive using Rack and Slot
@@ -270,12 +241,8 @@ impl S7Client {
     /// For Notes, Return and other Errors look at `connect_tsap()`
     ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<()> {
-        self.connect_rack_slot_impl(ip, rack, slot).add_context(|| {
-            format!(
-                "connect_rack_slot ip={ip} port={} rack={rack} slot={slot}",
-                self.port
-            )
-        })
+        self.connect_rack_slot_impl(ip, rack, slot)
+            .add_context(|| ctx::connect_rack_slot(ip, self.port, rack, slot))
     }
 
     fn connect_rack_slot_impl(&mut self, ip: &str, rack: u16, slot: u16) -> Result<()> {
@@ -317,12 +284,7 @@ impl S7Client {
     ///
     pub fn connect_tsap(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<()> {
         self.connect_tsap_impl(ip, local_tsap, remote_tsap)
-            .add_context(|| {
-                format!(
-                    "connect_tsap ip={ip} port={} local_tsap={local_tsap:#06x} remote_tsap={remote_tsap:#06x}",
-                    self.port
-                )
-            })
+            .add_context(|| ctx::connect_tsap(ip, self.port, local_tsap, remote_tsap))
     }
 
     fn connect_tsap_impl(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<()> {
@@ -354,36 +316,10 @@ impl S7Client {
         stream.set_nodelay(true).map_err(error::io)?;
 
         // ISO-on-TCP handshake
-        let iso_cr: [u8; ISO_CR_LEN] = [
-            // TPKT (RFC1006 Header)
-            ISO_ID,               // RFC 1006 ID (3)
-            0x00,                 // Reserved, always 0
-            hi_part!(ISO_CR_LEN), // High part of packet lenght (entire frame, payload and TPDU included)
-            lo_part!(ISO_CR_LEN), // Low part of packet lenght (entire frame, payload and TPDU included)
-            // COTP (ISO 8073 Header)
-            0x11,                  // COTP header length (LI = 17)
-            ISO_CONN_REQ,          // CR - Connection Request ID
-            0x00,                  // Dst Reference HI
-            0x00,                  // Dst Reference LO
-            0x00,                  // Src Reference HI
-            0x01,                  // Src Reference LO
-            0x00,                  // Class + Options Flags
-            0xC0,                  // TPDU size parameter
-            0x01,                  // Parameter length
-            0x0A,                  // TPDU size exponent (2^10 = 1024)
-            0xC1,                  // Src TSAP Identifier
-            0x02,                  // Src TSAP Length (2 bytes)
-            hi_part!(local_tsap),  // Loc TSAP HI
-            lo_part!(local_tsap),  // Loc TSAP LO
-            0xC2,                  // Rem TSAP Identifier
-            0x02,                  // Rem TSAP Length (2 bytes)
-            hi_part!(remote_tsap), // Rem TSAP HI
-            lo_part!(remote_tsap), // Rem TSAP LO
-        ];
-
+        let iso_cr = protocol::connection_request(local_tsap, remote_tsap);
         stream.write_all(&iso_cr).map_err(error::io)?;
 
-        let iso_resp = protocol::read_tpkt(&mut stream, 1028, rd_timeout)?;
+        let iso_resp = protocol::read_tpkt(&mut stream, protocol::CONFIRM_FRAME_MAX, rd_timeout)?;
         let tpdu_limit = protocol::validate_connection_confirm(&iso_resp)?;
 
         let limits = protocol::negotiate(&mut stream, tpdu_limit, rd_timeout)?;
@@ -486,12 +422,7 @@ impl S7Client {
             protocol::Transfer::area(area, db_number, start, wordlen),
             buffer,
         )
-        .add_context(|| {
-            format!(
-                "read_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
-                buffer.len()
-            )
-        })
+        .add_context(|| ctx::read_area(area, db_number, start, wordlen, buffer.len()))
     }
 
     fn read_area_impl(&mut self, transfer: protocol::Transfer, buffer: &mut [u8]) -> Result<()> {
@@ -595,12 +526,7 @@ impl S7Client {
             protocol::Transfer::area(area, db_number, start, wordlen),
             buffer,
         )
-        .add_context(|| {
-            format!(
-                "write_area area={area:#04x} db={db_number} start={start} wordlen={wordlen} len={}",
-                buffer.len()
-            )
-        })
+        .add_context(|| ctx::write_area(area, db_number, start, wordlen, buffer.len()))
     }
 
     fn write_area_impl(&mut self, transfer: protocol::Transfer, buffer: &[u8]) -> Result<()> {
@@ -666,7 +592,7 @@ impl S7Client {
     ///
     pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> Result<()> {
         self.read_area_impl(protocol::Transfer::db(db_number, start), buffer)
-            .add_context(|| format!("read_db db={db_number} start={start} len={}", buffer.len()))
+            .add_context(|| ctx::read_db(db_number, start, buffer.len()))
     }
 
     /// ### Reads a bit from a specific S7 memory area
@@ -710,11 +636,7 @@ impl S7Client {
         bit_idx: u8,
     ) -> Result<bool> {
         self.read_bit_impl(area, db_number, byte_num, bit_idx)
-            .add_context(|| {
-                format!(
-                    "read_bit area={area:#04x} db={db_number} byte_num={byte_num} bit_idx={bit_idx}"
-                )
-            })
+            .add_context(|| ctx::read_bit(area, db_number, byte_num, bit_idx))
     }
 
     fn read_bit_impl(
@@ -755,7 +677,7 @@ impl S7Client {
     ///
     pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> Result<()> {
         self.write_area_impl(protocol::Transfer::db(db_number, start), buffer)
-            .add_context(|| format!("write_db db={db_number} start={start} len={}", buffer.len()))
+            .add_context(|| ctx::write_db(db_number, start, buffer.len()))
     }
 
     /// ### Writes a bit to a specific S7 memory area
@@ -799,11 +721,7 @@ impl S7Client {
         value: bool,
     ) -> Result<()> {
         self.write_bit_impl(area, db_number, byte_num, bit_idx, value)
-            .add_context(|| {
-                format!(
-                    "write_bit area={area:#04x} db={db_number} byte_num={byte_num} bit_idx={bit_idx}"
-                )
-            })
+            .add_context(|| ctx::write_bit(area, db_number, byte_num, bit_idx))
     }
 
     fn write_bit_impl(
