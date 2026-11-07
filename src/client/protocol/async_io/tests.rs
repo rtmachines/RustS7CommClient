@@ -4,8 +4,10 @@ use crate::client::{S7_AREA_DB, S7_AREA_MK, S7_WL_BIT, S7_WL_BYTE};
 use crate::error::{assert_kind, kind};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream, ReadBuf};
 
 const SECOND: Duration = Duration::from_secs(1);
 const TIMEOUTS: Timeouts = Timeouts {
@@ -392,6 +394,60 @@ async fn eof_inside_a_frame_is_connection_closed() {
             kind::CONNECTION_CLOSED,
         );
     }
+}
+
+/// Reader that returns scripted pieces and errors, then end of stream.
+struct ScriptedReads(VecDeque<io::Result<Vec<u8>>>);
+
+impl AsyncRead for ScriptedReads {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.0.pop_front() {
+            Some(Ok(mut bytes)) => {
+                let n = bytes.len().min(buf.remaining());
+                buf.put_slice(&bytes[..n]);
+                if n < bytes.len() {
+                    self.0.push_front(Ok(bytes.split_off(n)));
+                }
+                Poll::Ready(Ok(()))
+            }
+            Some(Err(e)) => Poll::Ready(Err(e)),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn other_read_errors_are_io_errors_not_timeouts() {
+    for io_kind in [
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+    ] {
+        let mut reader =
+            ScriptedReads(VecDeque::from([Ok(vec![3, 0, 0, 22]), Err(io_kind.into())]));
+        let result = read_tpkt(&mut reader, 487, SECOND).await;
+        assert_kind(&result, kind::IO);
+        let message = result.unwrap_err().to_string();
+        assert!(!message.contains("no complete response frame"), "{message}");
+        assert!(
+            message.contains(&io::Error::from(io_kind).to_string()),
+            "{message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn interrupted_read_is_retried() {
+    let frame = tpkt(&[1, 2, 3]);
+    let mut reader = ScriptedReads(VecDeque::from([
+        Ok(frame[..2].to_vec()),
+        Err(io::ErrorKind::Interrupted.into()),
+        Ok(frame[2..].to_vec()),
+    ]));
+    assert_eq!(read_tpkt(&mut reader, 487, SECOND).await.unwrap(), frame);
 }
 
 #[tokio::test]

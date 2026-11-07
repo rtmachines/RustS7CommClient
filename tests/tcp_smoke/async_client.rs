@@ -1,8 +1,8 @@
 //! `AsyncS7Client` against a mock PLC on a tokio loopback listener.
-use super::{assert_kind, contexts, reply};
+use super::{assert_job_time, assert_kind, contexts, reply, SLOW};
 use rust7::{kind, AsyncS7Client, S7_AREA_DB, S7_WL_BIT};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -13,6 +13,8 @@ enum Step {
     Normal,
     /// The response is sent in small TCP segments with pauses between them.
     Segmented,
+    /// The response is sent after `SLOW`.
+    Slow,
     /// Item return code 10 (object does not exist).
     NotFound,
     /// Part of the response, then silence until the client closes the socket.
@@ -24,6 +26,7 @@ enum Step {
 /// What the mock PLC saw.
 #[derive(Debug)]
 struct Served {
+    connection_request: Vec<u8>,
     requests: Vec<Vec<u8>>,
     /// The client closed the socket (the mock read end of stream).
     closed_by_client: bool,
@@ -47,14 +50,21 @@ async fn wait_for_close(stream: &mut TcpStream) -> bool {
     )
 }
 
-/// A PLC with 64 KiB of DB memory, negotiating `pdu` bytes.
-async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
+/// A PLC with 64 KiB of DB memory, negotiating `pdu` bytes; the connection
+/// confirm is sent after `handshake_delay`.
+async fn serve(
+    mut stream: TcpStream,
+    pdu: u16,
+    script: Vec<Step>,
+    handshake_delay: Duration,
+) -> Served {
     stream.set_nodelay(true).unwrap();
     let cr = frame(&mut stream).await.unwrap();
     assert_eq!(cr[5], 0xe0);
     let cc = [
         3, 0, 0, 22, 17, 0xd0, 0, 1, 0, 1, 0, 0xc0, 1, 10, 0xc1, 2, 1, 0, 0xc2, 2, 1, 0,
     ];
+    tokio::time::sleep(handshake_delay).await;
     stream.write_all(&cc).await.unwrap();
     let pn = frame(&mut stream).await.unwrap();
     let mut response = vec![
@@ -71,6 +81,7 @@ async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
             Ok(request) => request,
             Err(_) => {
                 return Served {
+                    connection_request: cr,
                     requests,
                     closed_by_client: true,
                 }
@@ -112,6 +123,10 @@ async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
         requests.push(request);
         match step {
             Step::Normal | Step::NotFound => stream.write_all(&response).await.unwrap(),
+            Step::Slow => {
+                tokio::time::sleep(SLOW).await;
+                stream.write_all(&response).await.unwrap();
+            }
             Step::Segmented => {
                 for piece in response.chunks(3) {
                     stream.write_all(piece).await.unwrap();
@@ -123,6 +138,7 @@ async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
                 stream.write_all(&response[..9]).await.unwrap();
                 let closed_by_client = wait_for_close(&mut stream).await;
                 return Served {
+                    connection_request: cr,
                     requests,
                     closed_by_client,
                 };
@@ -130,6 +146,7 @@ async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
             Step::Eof => {
                 stream.write_all(&response[..9]).await.unwrap();
                 return Served {
+                    connection_request: cr,
                     requests,
                     closed_by_client: false,
                 };
@@ -138,20 +155,30 @@ async fn serve(mut stream: TcpStream, pdu: u16, script: Vec<Step>) -> Served {
     }
 }
 
-/// A client connected to a fresh mock PLC.
-async fn connected(
+/// A mock PLC on a fresh loopback port, serving one connection.
+async fn listen(
     pdu: u16,
-    rd_timeout_ms: u64,
     script: Vec<Step>,
-) -> (AsyncS7Client, JoinHandle<Served>) {
+    handshake_delay: Duration,
+) -> (u16, JoinHandle<Served>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("loopback sockets required");
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, pdu, script).await
+        serve(stream, pdu, script, handshake_delay).await
     });
+    (port, server)
+}
+
+/// A client connected to a fresh mock PLC.
+async fn connected(
+    pdu: u16,
+    rd_timeout_ms: u64,
+    script: Vec<Step>,
+) -> (AsyncS7Client, JoinHandle<Served>) {
+    let (port, server) = listen(pdu, script, Duration::ZERO).await;
     let mut client = AsyncS7Client::new();
     client.set_connection_port(port).unwrap();
     client.set_timeout(1000, rd_timeout_ms, 1000).unwrap();
@@ -342,6 +369,64 @@ async fn async_connect_abandoned_during_handshake_leaves_client_disconnected() {
         &client.read_db(1, 0, &mut [0; 1]).await,
         kind::NOT_CONNECTED,
     );
+}
+
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
+async fn async_connect_tsap_sends_its_tsaps() {
+    let (port, server) = listen(240, vec![], Duration::ZERO).await;
+    let mut client = AsyncS7Client::new();
+    client.set_connection_port(port).unwrap();
+    client
+        .connect_tsap("127.0.0.1", 0x1000, 0x0301)
+        .await
+        .unwrap();
+    assert!(client.connected);
+    assert_eq!(client.pdu_length, 240);
+    client.write_db(1, 0, &[1, 2, 3, 4]).await.unwrap();
+    let mut read = [0; 4];
+    client.read_db(1, 0, &mut read).await.unwrap();
+    assert_eq!(read, [1, 2, 3, 4]);
+    client.disconnect();
+    let served = server.await.unwrap();
+    assert_eq!(
+        &served.connection_request[14..22],
+        &[0xc1, 2, 0x10, 0x00, 0xc2, 2, 0x03, 0x01]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
+async fn async_last_time_reports_job_duration_in_milliseconds() {
+    let (port, server) = listen(240, vec![Step::Slow; 2], SLOW).await;
+    let mut client = AsyncS7Client::new();
+    client.set_connection_port(port).unwrap();
+    let start = Instant::now();
+    client.connect_s71200_1500("127.0.0.1").await.unwrap();
+    assert_job_time(client.last_time, start);
+    let start = Instant::now();
+    client.read_db(1, 0, &mut [0; 4]).await.unwrap();
+    assert_job_time(client.last_time, start);
+    let start = Instant::now();
+    client.write_db(1, 0, &[1, 2, 3, 4]).await.unwrap();
+    assert_job_time(client.last_time, start);
+    drop(client);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires permission to open loopback sockets"]
+async fn async_cleared_connected_flag_sends_no_request() {
+    // Like `S7Client`, a session marked disconnected is not used.
+    let (mut client, server) = connected(240, 1000, vec![]).await;
+    client.connected = false;
+    assert_kind(
+        &client.read_db(1, 0, &mut [0; 4]).await,
+        kind::NOT_CONNECTED,
+    );
+    assert_kind(&client.write_db(1, 0, &[1; 4]).await, kind::NOT_CONNECTED);
+    drop(client);
+    assert!(server.await.unwrap().requests.is_empty());
 }
 
 #[tokio::test]
