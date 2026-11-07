@@ -354,7 +354,13 @@ fn serve_requests(
         assert!(response.len() - 4 <= tpdu_limit);
         if first {
             match scenario {
-                Scenario::BadHeader(_) => response[0] = 2,
+                Scenario::BadHeader(_) => {
+                    // The client drops the connection with unread bytes, so the
+                    // reply may meet an RST; ignore the write result.
+                    response[0] = 2;
+                    let _ = send_split(&mut stream, &response);
+                    return Ok(());
+                }
                 Scenario::Fragment(_) => response[6] = 0,
                 _ => {}
             }
