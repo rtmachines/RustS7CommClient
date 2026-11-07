@@ -13,6 +13,8 @@
 - A read timeout always reports `no complete response frame within <N> ms` (`kind::IO`), whether the socket or the frame deadline expired
 - `kind::S7_UNSPECIFIED` messages include the S7 error class and code or the item return code; a framing error during PDU negotiation is kept as the `source()` of `kind::PDU_NEGOTIATION_FAILED`
 - The client disconnects itself after transport or framing errors (`kind::IO`, `kind::CONNECTION_CLOSED`, `kind::ISO_INVALID_HEADER`, `kind::ISO_INVALID_TELEGRAM`, `kind::ISO_FRAGMENTED_PACKET`); PLC errors keep the connection
+- Responses are checked against the request (reference, function, item count, transport size, lengths). A mismatch is `kind::ISO_INVALID_TELEGRAM` and disconnects, so a device that 0.1.2 tolerated may now be rejected
+- `disconnect()` resets `pdu_length` to 0
 
 ### Added
 - Minimum supported Rust version declared: `rust-version = "1.99"`
@@ -29,6 +31,12 @@
 - `connect_rack_slot` rejects rack > 7 or slot > 31 instead of panicking or silently connecting to another TSAP
 - Raw bit writes send 0/1, matching the documented 'true if != 0' rule
 - Error documentation matches actual categories
+- `read_bit`/`write_bit` with `byte_num` >= 8192 no longer overflow the bit address. 0.1.2 computed it in `u16`: a release build read or wrote byte `byte_num % 8192` (e.g. DBX8192.0 became DBX0.0), a debug build panicked
+- Transfers larger than 65535 bytes are no longer truncated. 0.1.2 transferred only the first 65535 bytes and returned `Ok`
+- A short or truncated read response is no longer reported as success. 0.1.2 could return `Ok` with a partly filled buffer
+- A response split across several TCP reads is assembled instead of being rejected
+- A negotiated PDU below 29 bytes is rejected with `kind::PDU_NEGOTIATION_FAILED` instead of underflowing the chunk size
+- Bit access with an empty buffer returns `kind::INVALID_FUN_PARAMETER` before any I/O
 
 ### Migration 0.1 to 0.2
 - Passing `rust7::AnyError` through an application without conversion requires the application's `anyerror` to be semver-compatible with 0.1.x (it is the same type only when Cargo unifies the versions).
@@ -38,6 +46,7 @@
 - Causes: walk the chain with `std::error::Error::source()`; `{e}` prints it inline and `{e:#}` on separate lines.
 - Lost information: `io::ErrorKind`, `raw_os_error` and downcasting to `io::Error` are not available after conversion; use `kind::IO` and the message text instead.
 - Serialization: `AnyError` serializes with serde in the format owned by `anyerror` (`typ`, `msg`, `source`, `context`, `backtrace`). A round trip preserves category, context and the cause chain. There is no schema stability promise across `anyerror` versions, and full `Display` text is not stable; only categories and the presence of context fields are.
+- Bit writes with `byte_num` >= 8192 made by a 0.1.2 release build reached byte `byte_num % 8192`: check the affected PLC data. Writes of more than 65535 bytes wrote only the first 65535; the same call in 0.2.0 writes the whole buffer.
 - Unchanged: writes are not atomic and are never retried automatically.
 - After an error, use `S7Client::confirmed`: for writes bytes `[0, confirmed)` were acknowledged and the next chunk may or may not have been applied; for reads only `[0, confirmed)` of the buffer is a result.
 
